@@ -1,0 +1,235 @@
+name: Deploy and Train
+
+# ── Triggers ──────────────────────────────────────────────────────────────────
+# workflow_dispatch is the primary trigger — training runs cost money, so
+# explicit manual invocation is the safest default.
+#
+# To enable automatic runs on push to main, uncomment the `push` block below.
+# Push-triggered runs will deploy the stack AND launch all training jobs.
+
+on:
+  workflow_dispatch:
+    inputs:
+      global_base_model:
+        description: "HuggingFace base model (overrides env default for this run)"
+        required: false
+        default: ""
+      local_base_model:
+        description: "Local/private base model override (empty = use global)"
+        required: false
+        default: ""
+      skip_training:
+        description: "Set to 'true' to deploy infrastructure only, skip training"
+        required: false
+        default: "false"
+
+  # push:
+  #   branches: [main]
+  #   paths:
+  #     - "template.yaml"
+  #     - "src/**"
+
+# ── Permissions ───────────────────────────────────────────────────────────────
+# id-token: write is required for OIDC-based AWS credential exchange.
+permissions:
+  id-token: write
+  contents: read
+
+# ── Global env vars ───────────────────────────────────────────────────────────
+env:
+  AWS_REGION: us-east-1
+  SAM_STACK_NAME: trainweave
+
+  # Model configuration — override at dispatch time or via repository variables
+  GLOBAL_BASE_MODEL: ${{ inputs.global_base_model || vars.GLOBAL_BASE_MODEL || 'meta-llama/Llama-3.2-3B-Instruct' }}
+  LOCAL_BASE_MODEL: ${{ inputs.local_base_model || vars.LOCAL_BASE_MODEL || '' }}
+
+  # Infrastructure — set these as GitHub Actions secrets
+  TRAINING_ARTIFACTS_BUCKET: ${{ secrets.TRAINING_ARTIFACTS_BUCKET }}
+  TRAINING_CODE_BUCKET: ${{ secrets.TRAINING_CODE_BUCKET }}
+  VPC_ID: ${{ secrets.VPC_ID }}
+  SUBNET_ID: ${{ secrets.SUBNET_ID }}              # subnet-01714c0c1b4590e4e (LambdaSubnetAz1Id)
+  SECURITY_GROUP_ID: ${{ secrets.SECURITY_GROUP_ID }}
+  TRAINING_AMI_ID: ${{ secrets.TRAINING_AMI_ID }}  # Deep Learning AMI for us-east-1
+
+jobs:
+  deploy-and-train:
+    name: Deploy stack and launch training runs
+    runs-on: ubuntu-latest
+    timeout-minutes: 30  # deploy + 3 async invokes should complete well under 30m
+
+    steps:
+      # ── Checkout ─────────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── AWS credentials ───────────────────────────────────────────────────────
+      # OIDC preferred: no long-lived credentials in GitHub secrets.
+      # Requires a trust policy on AWS_ROLE_ARN that allows
+      # token.actions.githubusercontent.com for this repo.
+      #
+      # Fallback to static keys: comment out this step and uncomment the next.
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: trainweave-deploy
+
+      # ── (Fallback) Static key credentials ────────────────────────────────────
+      # Uncomment if you are not using OIDC. Delete if you are.
+      # - name: Configure AWS credentials (static keys)
+      #   uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      #     aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      #     aws-region: ${{ env.AWS_REGION }}
+
+      # ── SAM CLI ───────────────────────────────────────────────────────────────
+      - name: Set up SAM CLI
+        uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+
+      # ── SAM build ─────────────────────────────────────────────────────────────
+      # Lambda uses only stdlib + boto3 (pre-installed in runtime), so build
+      # is fast. No Docker needed — use --use-container only if adding native
+      # dependencies to the Lambda.
+      - name: Build SAM application
+        run: sam build --use-container
+
+      # ── SAM deploy ────────────────────────────────────────────────────────────
+      # Idempotent: re-running deploy on an unchanged stack is a no-op.
+      # --no-fail-on-empty-changeset prevents failures when nothing changed.
+      - name: Deploy SAM stack
+        run: |
+          sam deploy \
+            --stack-name "$SAM_STACK_NAME" \
+            --region "$AWS_REGION" \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+            --parameter-overrides \
+              GlobalBaseModel="$GLOBAL_BASE_MODEL" \
+              LocalBaseModel="$LOCAL_BASE_MODEL" \
+              TrainingArtifactsBucket="$TRAINING_ARTIFACTS_BUCKET" \
+              TrainingCodeBucket="$TRAINING_CODE_BUCKET" \
+              VpcId="$VPC_ID" \
+              SubnetId="$SUBNET_ID" \
+              SecurityGroupId="$SECURITY_GROUP_ID" \
+              TrainingAmiId="$TRAINING_AMI_ID"
+
+      # ── Get stack outputs ─────────────────────────────────────────────────────
+      - name: Get orchestrator function name
+        id: stack-outputs
+        run: |
+          FUNCTION_NAME=$(aws cloudformation describe-stacks \
+            --stack-name "$SAM_STACK_NAME" \
+            --region "$AWS_REGION" \
+            --query "Stacks[0].Outputs[?OutputKey=='OrchestratorFunctionName'].OutputValue" \
+            --output text)
+          echo "function_name=$FUNCTION_NAME" >> "$GITHUB_OUTPUT"
+          echo "Orchestrator function: $FUNCTION_NAME"
+
+      # ── Upload training code to S3 ────────────────────────────────────────────
+      # bootstrap.sh and train.py live in the code bucket so the EC2 instance
+      # can pull them at runtime without baking them into an AMI.
+      # Re-uploading on every deploy is cheap and ensures code stays in sync.
+      - name: Upload training code to S3
+        run: |
+          aws s3 sync src/training/ \
+            "s3://$TRAINING_CODE_BUCKET/training/" \
+            --delete \
+            --region "$AWS_REGION"
+          echo "Training code uploaded to s3://$TRAINING_CODE_BUCKET/training/"
+
+      # ── Training runs ─────────────────────────────────────────────────────────
+      # Each step invokes the Lambda asynchronously (--invocation-type Event).
+      # GitHub Actions does NOT wait for training to complete — instances
+      # self-terminate when done. Check S3 for adapter outputs.
+      #
+      # To add a new dataset: copy one of these steps, update dataset_name,
+      # dataset_bucket, and dataset_key. No infrastructure changes needed.
+
+      - name: Train — dataset-a (customer support)
+        if: ${{ inputs.skip_training != 'true' }}
+        env:
+          FUNCTION_NAME: ${{ steps.stack-outputs.outputs.function_name }}
+        run: |
+          JOB_ID="trainweave-dataset-a-$(date -u +%Y%m%d-%H%M%S)"
+          PAYLOAD=$(jq -n \
+            --arg job_id "$JOB_ID" \
+            --arg dataset_name "dataset-a" \
+            --arg dataset_bucket "my-ml-datasets" \
+            --arg dataset_key "lora/customer-support/train.jsonl" \
+            '{job_id: $job_id, dataset_name: $dataset_name, dataset_bucket: $dataset_bucket, dataset_key: $dataset_key}')
+
+          aws lambda invoke \
+            --function-name "$FUNCTION_NAME" \
+            --invocation-type Event \
+            --payload "$PAYLOAD" \
+            --region "$AWS_REGION" \
+            /dev/null
+
+          echo "Launched training job: $JOB_ID"
+          echo "Adapter will be uploaded to: s3://$TRAINING_ARTIFACTS_BUCKET/adapters/$JOB_ID/"
+
+      - name: Train — dataset-b (API JSON)
+        if: ${{ inputs.skip_training != 'true' }}
+        env:
+          FUNCTION_NAME: ${{ steps.stack-outputs.outputs.function_name }}
+        run: |
+          JOB_ID="trainweave-dataset-b-$(date -u +%Y%m%d-%H%M%S)"
+          PAYLOAD=$(jq -n \
+            --arg job_id "$JOB_ID" \
+            --arg dataset_name "dataset-b" \
+            --arg dataset_bucket "my-ml-datasets" \
+            --arg dataset_key "lora/api-json/train.jsonl" \
+            '{job_id: $job_id, dataset_name: $dataset_name, dataset_bucket: $dataset_bucket, dataset_key: $dataset_key}')
+
+          aws lambda invoke \
+            --function-name "$FUNCTION_NAME" \
+            --invocation-type Event \
+            --payload "$PAYLOAD" \
+            --region "$AWS_REGION" \
+            /dev/null
+
+          echo "Launched training job: $JOB_ID"
+          echo "Adapter will be uploaded to: s3://$TRAINING_ARTIFACTS_BUCKET/adapters/$JOB_ID/"
+
+      - name: Train — dataset-c (tool calling)
+        if: ${{ inputs.skip_training != 'true' }}
+        env:
+          FUNCTION_NAME: ${{ steps.stack-outputs.outputs.function_name }}
+        run: |
+          JOB_ID="trainweave-dataset-c-$(date -u +%Y%m%d-%H%M%S)"
+          PAYLOAD=$(jq -n \
+            --arg job_id "$JOB_ID" \
+            --arg dataset_name "dataset-c" \
+            --arg dataset_bucket "my-ml-datasets" \
+            --arg dataset_key "lora/tool-calling/train.jsonl" \
+            '{job_id: $job_id, dataset_name: $dataset_name, dataset_bucket: $dataset_bucket, dataset_key: $dataset_key}')
+
+          aws lambda invoke \
+            --function-name "$FUNCTION_NAME" \
+            --invocation-type Event \
+            --payload "$PAYLOAD" \
+            --region "$AWS_REGION" \
+            /dev/null
+
+          echo "Launched training job: $JOB_ID"
+          echo "Adapter will be uploaded to: s3://$TRAINING_ARTIFACTS_BUCKET/adapters/$JOB_ID/"
+
+      # ── Summary ───────────────────────────────────────────────────────────────
+      - name: Print summary
+        if: ${{ inputs.skip_training != 'true' }}
+        run: |
+          echo "## TrainWeave — Training Jobs Launched" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "All 3 training jobs launched asynchronously." >> "$GITHUB_STEP_SUMMARY"
+          echo "EC2 Spot instances will self-terminate when training completes." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Monitor progress:**" >> "$GITHUB_STEP_SUMMARY"
+          echo "- EC2 console → filter by tag \`trainweave:project=trainweave\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- S3: \`s3://$TRAINING_ARTIFACTS_BUCKET/adapters/\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- CloudWatch Logs: \`/aws/lambda/trainweave-orchestrator\`" >> "$GITHUB_STEP_SUMMARY"

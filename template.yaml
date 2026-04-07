@@ -1,0 +1,289 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  TrainWeave — Ephemeral EC2 Spot LoRA training orchestration.
+  Deploys a single Lambda that launches spot GPU instances per training run.
+  No SageMaker, no NAT Gateway, no idle compute.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Parameters
+# ─────────────────────────────────────────────────────────────────────────────
+Parameters:
+
+  # Model resolution — LocalBaseModel overrides GlobalBaseModel when non-empty
+  GlobalBaseModel:
+    Type: String
+    Description: >
+      HuggingFace model ID used when LocalBaseModel is empty.
+      Example: meta-llama/Llama-3.2-3B-Instruct
+
+  LocalBaseModel:
+    Type: String
+    Default: ""
+    Description: >
+      If non-empty, overrides GlobalBaseModel for every training run.
+      Useful for pinning a specific model revision or a private model path.
+
+  # Storage
+  TrainingArtifactsBucket:
+    Type: String
+    Description: S3 bucket for adapter outputs and checkpoints (must already exist).
+
+  TrainingCodeBucket:
+    Type: String
+    Description: >
+      S3 bucket holding training code (bootstrap.sh, train.py).
+      Deploy step: aws s3 sync src/training/ s3://BUCKET/training/
+
+  # Networking — reference existing resources; do NOT create new ones
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: >
+      Existing VPC ID. Not used by Lambda (which runs outside VPC), but
+      referenced for documentation and SecurityGroup validation.
+
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: >
+      Private subnet for EC2 Spot instances. Must route outbound traffic
+      through the existing NAT instance (not a NAT Gateway).
+      Recommended: LambdaSubnetAz1Id from tarun-teamweave-shared stack
+      (subnet-01714c0c1b4590e4e). S3 traffic uses the existing VPC gateway
+      endpoint (vpce-0c0989507284dc612) — zero NAT data-transfer cost.
+
+  SecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: >
+      Security group for EC2 training instances. Must allow outbound HTTPS
+      (443) for pip/HuggingFace downloads and AWS API calls.
+
+  # EC2 training instance configuration
+  DefaultTrainingInstanceType:
+    Type: String
+    Default: g4dn.xlarge
+    Description: >
+      EC2 instance type for training. g4dn.xlarge = NVIDIA T4 16GB VRAM.
+      Override per-run via Lambda event payload.
+    AllowedValues:
+      - g4dn.xlarge
+      - g4dn.2xlarge
+      - g4dn.4xlarge
+      - g5.xlarge
+      - g5.2xlarge
+      - p3.2xlarge
+
+  SpotMaxPrice:
+    Type: String
+    Default: ""
+    Description: >
+      Maximum spot price per hour (e.g. "0.30"). Leave empty to let AWS
+      automatically set the price (capped at on-demand rate). Empty is
+      almost always the right choice — it maximises availability.
+
+  TrainingAmiId:
+    Type: AWS::EC2::Image::Id
+    Description: >
+      AMI for training instances. Use an AWS Deep Learning AMI (Amazon Linux 2)
+      which ships with PyTorch, CUDA, and cuDNN pre-installed — drastically
+      cuts bootstrap time vs a base AMI.
+      Find latest: aws ec2 describe-images \
+        --owners amazon \
+        --filters "Name=name,Values=Deep Learning AMI GPU PyTorch*Amazon Linux 2*" \
+        --query "sort_by(Images,&CreationDate)[-1].ImageId"
+
+  KeyPairName:
+    Type: String
+    Default: ""
+    Description: >
+      EC2 key pair for SSH access. Leave empty in production — instances
+      self-terminate and have no persistent state. Only set for debugging.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Conditions
+# ─────────────────────────────────────────────────────────────────────────────
+Conditions:
+  # Used to conditionally attach key pair in RunInstances call
+  HasKeyPair: !Not [!Equals [!Ref KeyPairName, ""]]
+  HasSpotMaxPrice: !Not [!Equals [!Ref SpotMaxPrice, ""]]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Globals
+# ─────────────────────────────────────────────────────────────────────────────
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures: [x86_64]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Resources
+# ─────────────────────────────────────────────────────────────────────────────
+Resources:
+
+  # ── CloudWatch log group (explicit so retention is controlled) ──────────────
+  OrchestratorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/trainweave-orchestrator
+      RetentionInDays: 7
+
+  # ── IAM role for the Lambda orchestrator ────────────────────────────────────
+  OrchestratorFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: trainweave-orchestrator-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: trainweave-orchestrator-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+
+              # Launch spot instances. ec2:RunInstances requires * on instance
+              # resource types; the condition scopes to our subnet.
+              - Sid: EC2RunInstances
+                Effect: Allow
+                Action:
+                  - ec2:RunInstances
+                Resource:
+                  - !Sub "arn:aws:ec2:${AWS::Region}::image/*"
+                  - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+                  - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*"
+                  - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*"
+                  - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:subnet/*"
+                  - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:volume/*"
+                  - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:key-pair/*"
+                  - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:launch-template/*"
+
+              # Tag resources created by RunInstances
+              - Sid: EC2CreateTags
+                Effect: Allow
+                Action: ec2:CreateTags
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    ec2:CreateAction: RunInstances
+
+              # Pass the EC2 instance profile to the launched instance
+              - Sid: PassEC2InstanceRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt EC2TrainingRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: ec2.amazonaws.com
+
+  # ── Lambda orchestrator ─────────────────────────────────────────────────────
+  OrchestratorFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: OrchestratorLogGroup
+    Properties:
+      FunctionName: trainweave-orchestrator
+      Handler: app.handler
+      CodeUri: src/orchestrator/
+      Role: !GetAtt OrchestratorFunctionRole.Arn
+      MemorySize: 128
+      Timeout: 30
+      Description: >
+        Resolves effective base model, builds EC2 UserData, and launches a
+        single EC2 Spot GPU instance per training job. Async — returns
+        immediately with instance ID.
+      Environment:
+        Variables:
+          GLOBAL_BASE_MODEL: !Ref GlobalBaseModel
+          LOCAL_BASE_MODEL: !Ref LocalBaseModel
+          ARTIFACTS_BUCKET: !Ref TrainingArtifactsBucket
+          CODE_BUCKET: !Ref TrainingCodeBucket
+          SUBNET_ID: !Ref SubnetId
+          SECURITY_GROUP_ID: !Ref SecurityGroupId
+          INSTANCE_PROFILE_ARN: !GetAtt EC2TrainingInstanceProfile.Arn
+          DEFAULT_INSTANCE_TYPE: !Ref DefaultTrainingInstanceType
+          SPOT_MAX_PRICE: !Ref SpotMaxPrice
+          TRAINING_AMI_ID: !Ref TrainingAmiId
+          KEY_PAIR_NAME: !Ref KeyPairName
+          AWS_ACCOUNT_ID: !Ref AWS::AccountId
+
+  # ── IAM role for EC2 training instances ────────────────────────────────────
+  EC2TrainingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: trainweave-ec2-training-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: trainweave-ec2-training-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+
+              # Read training code (bootstrap.sh, train.py) from code bucket
+              - Sid: ReadTrainingCode
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:HeadObject
+                Resource: !Sub "arn:aws:s3:::${TrainingCodeBucket}/*"
+
+              # Read/list artifacts bucket (for checkpoint resume if needed)
+              # and write adapter outputs + checkpoints
+              - Sid: ReadWriteArtifacts
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:HeadObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::${TrainingArtifactsBucket}"
+                  - !Sub "arn:aws:s3:::${TrainingArtifactsBucket}/*"
+
+              # Write training logs to CloudWatch
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/trainweave/*:*"
+
+  # ── Instance profile wrapping the EC2 role ─────────────────────────────────
+  EC2TrainingInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: trainweave-ec2-training-profile
+      Roles:
+        - !Ref EC2TrainingRole
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Outputs
+# ─────────────────────────────────────────────────────────────────────────────
+Outputs:
+
+  OrchestratorFunctionName:
+    Description: Lambda function name — use with aws lambda invoke
+    Value: !Ref OrchestratorFunction
+
+  OrchestratorFunctionArn:
+    Description: Lambda function ARN
+    Value: !GetAtt OrchestratorFunction.Arn
+
+  EC2TrainingInstanceProfileArn:
+    Description: Instance profile ARN attached to every training EC2 instance
+    Value: !GetAtt EC2TrainingInstanceProfile.Arn
+
+  EC2TrainingRoleArn:
+    Description: IAM role ARN for training instances
+    Value: !GetAtt EC2TrainingRole.Arn
