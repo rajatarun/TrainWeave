@@ -1,0 +1,12 @@
+# TrainWeave — Lambda orchestrator dependencies
+#
+# boto3 is pre-installed in the Lambda runtime but listed here for:
+#   1. Local development (pip install -r requirements.txt)
+#   2. sam build --use-container reproducibility
+#
+# Training dependencies (peft, transformers, trl, bitsandbytes, etc.)
+# are intentionally NOT listed here — they are installed on the EC2 instance
+# at runtime by src/training/bootstrap.sh. Bundling them in the Lambda
+# deployment package would add ~2GB for no benefit.
+
+boto3>=1.34.0
