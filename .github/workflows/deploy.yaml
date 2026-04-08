@@ -39,6 +39,7 @@ permissions:
 env:
   AWS_REGION: us-east-1
   SAM_STACK_NAME: trainweave
+  ASSUME_ROLE_ARN: arn:aws:iam::239571291755:role/teamweave-github-actions-sam-deployer
 
   # Model configuration — override at dispatch time or via repository variables
   GLOBAL_BASE_MODEL: ${{ inputs.global_base_model || vars.GLOBAL_BASE_MODEL || 'meta-llama/Llama-3.2-3B-Instruct' }}
@@ -63,27 +64,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── AWS credentials ───────────────────────────────────────────────────────
-      # OIDC preferred: no long-lived credentials in GitHub secrets.
-      # Requires a trust policy on AWS_ROLE_ARN that allows
-      # token.actions.githubusercontent.com for this repo.
-      #
-      # Fallback to static keys: comment out this step and uncomment the next.
-      - name: Configure AWS credentials (OIDC)
+      # ── AWS credentials (OIDC) ───────────────────────────────────────────────
+      - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: ${{ env.ASSUME_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-          role-session-name: trainweave-deploy
-
-      # ── (Fallback) Static key credentials ────────────────────────────────────
-      # Uncomment if you are not using OIDC. Delete if you are.
-      # - name: Configure AWS credentials (static keys)
-      #   uses: aws-actions/configure-aws-credentials@v4
-      #   with:
-      #     aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      #     aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      #     aws-region: ${{ env.AWS_REGION }}
 
       # ── SAM CLI ───────────────────────────────────────────────────────────────
       - name: Set up SAM CLI
