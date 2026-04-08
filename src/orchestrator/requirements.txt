@@ -1,0 +1,4 @@
+# Lambda runtime (python3.12) ships boto3 — no extra packages needed.
+# Listed explicitly so `sam build` produces a clean, reproducible package
+# and so the dependency is visible to reviewers.
+boto3>=1.34.0
