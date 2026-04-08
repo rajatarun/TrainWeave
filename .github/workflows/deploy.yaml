@@ -42,7 +42,7 @@ env:
   ASSUME_ROLE_ARN: arn:aws:iam::239571291755:role/teamweave-github-actions-sam-deployer
 
   # Model configuration — override at dispatch time or via repository variables
-  GLOBAL_BASE_MODEL: ${{ inputs.global_base_model || vars.GLOBAL_BASE_MODEL || 'meta-llama/Llama-3.2-3B-Instruct' }}
+  GLOBAL_BASE_MODEL: ${{ inputs.global_base_model || vars.GLOBAL_BASE_MODEL || 'Qwen/Qwen2.5-0.5B-Instruct' }}
   LOCAL_BASE_MODEL: ${{ inputs.local_base_model || vars.LOCAL_BASE_MODEL || '' }}
 
   # Infrastructure — set these as GitHub Actions secrets
