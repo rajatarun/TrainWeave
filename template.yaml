@@ -15,7 +15,7 @@ Parameters:
     Type: String
     Description: >
       HuggingFace model ID used when LocalBaseModel is empty.
-      Example: meta-llama/Llama-3.2-3B-Instruct
+      Example: Qwen/Qwen2.5-0.5B-Instruct
 
   LocalBaseModel:
     Type: String
