@@ -27,9 +27,19 @@ exec > >(tee -a "$LOGFILE") 2>&1
 
 log() { echo "[trainweave $(date -u +%H:%M:%SZ)] $*"; }
 
-# ── Shutdown on any error ─────────────────────────────────────────────────────
-# Captures the failing line number so the log is useful for debugging.
-trap 'log "ERROR at line $LINENO (exit $?). Initiating shutdown to avoid idle cost."; shutdown -h now' ERR
+# ── Terminate on any error ────────────────────────────────────────────────────
+# Uses the EC2 API for termination — more reliable than shutdown -h now on
+# newer AMIs where systemd may defer the halt. Falls back to shutdown if the
+# metadata service or CLI is unavailable.
+_terminate() {
+    IIDENT=$(curl -sf --max-time 5 http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || true)
+    if [[ -n "$IIDENT" ]]; then
+        log "Terminating instance $IIDENT via EC2 API"
+        aws ec2 terminate-instances --instance-ids "$IIDENT" --region "$AWS_DEFAULT_REGION" 2>/dev/null || true
+    fi
+    shutdown -h now
+}
+trap 'log "ERROR at line $LINENO (exit $?). Terminating to avoid idle cost."; _terminate' ERR
 
 log "Bootstrap started | JOB_ID=${JOB_ID}"
 log "Instance: $(curl -sf http://169.254.169.254/latest/meta-data/instance-id)"
@@ -127,9 +137,7 @@ aws s3 sync "$OUTPUT_DIR/" "$ADAPTER_S3_PATH" --exclude "checkpoint-*"
 log "Adapter uploaded. Job ${JOB_ID} finished successfully."
 
 # ── 7. Self-terminate ─────────────────────────────────────────────────────────
-# InstanceInitiatedShutdownBehavior=terminate (set by Lambda) means
-# `shutdown -h now` causes EC2 to terminate (not stop) the instance.
-# No ec2:TerminateInstances permission required — shutdown is initiated by
-# the OS, not the AWS API.
-log "Initiating instance shutdown."
-shutdown -h now
+# Terminate via the EC2 API first (immediate); shutdown -h now is the fallback
+# in case the metadata service or IAM credentials are momentarily unavailable.
+log "Job ${JOB_ID} finished successfully. Terminating instance."
+_terminate
