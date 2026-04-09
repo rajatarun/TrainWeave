@@ -46,7 +46,7 @@ env:
   LOCAL_BASE_MODEL: ${{ inputs.local_base_model || vars.LOCAL_BASE_MODEL || '' }}
 
   # SubnetId and SecurityGroup default to shared stack outputs; S3 buckets created by stack.
-  TRAINING_AMI_ID: ${{ secrets.TRAINING_AMI_ID }}  # Deep Learning AMI for us-east-1
+  # TRAINING_AMI_ID is resolved automatically at deploy time — no secret required.
 
 jobs:
   deploy-and-train:
@@ -72,6 +72,21 @@ jobs:
         with:
           use-installer: true
 
+      # ── Resolve Deep Learning AMI ─────────────────────────────────────────────
+      # Dynamically find the latest AWS Deep Learning AMI (PyTorch, Amazon Linux 2)
+      # so no TRAINING_AMI_ID secret is needed — always gets the newest available.
+      - name: Resolve Deep Learning AMI
+        id: resolve-ami
+        run: |
+          AMI_ID=$(aws ec2 describe-images \
+            --region "$AWS_REGION" \
+            --owners amazon \
+            --filters "Name=name,Values=Deep Learning AMI GPU PyTorch*Amazon Linux 2*" \
+            --query "sort_by(Images,&CreationDate)[-1].ImageId" \
+            --output text)
+          echo "ami_id=$AMI_ID" >> "$GITHUB_OUTPUT"
+          echo "Resolved Deep Learning AMI: $AMI_ID"
+
       # ── SAM build ─────────────────────────────────────────────────────────────
       # Lambda uses only stdlib + boto3 (pre-installed in runtime), so build
       # is fast. No Docker needed — use --use-container only if adding native
@@ -95,7 +110,7 @@ jobs:
             --parameter-overrides \
               GlobalBaseModel="$GLOBAL_BASE_MODEL" \
               LocalBaseModel="$LOCAL_BASE_MODEL" \
-              TrainingAmiId="$TRAINING_AMI_ID"
+              TrainingAmiId="${{ steps.resolve-ami.outputs.ami_id }}"
 
       # ── Get stack outputs ─────────────────────────────────────────────────────
       - name: Get stack outputs
