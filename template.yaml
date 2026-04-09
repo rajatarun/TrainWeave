@@ -20,7 +20,7 @@ Parameters:
 
   LocalBaseModel:
     Type: String
-    Default: ""
+    Default: "Qwen/Qwen2.5-0.5B-Instruct"
     Description: >
       If non-empty, overrides GlobalBaseModel for every training run.
       Useful for pinning a specific model revision or a private model path.
