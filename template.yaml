@@ -92,7 +92,6 @@ Parameters:
 Conditions:
   HasKeyPair: !Not [!Equals [!Ref KeyPairName, ""]]
   HasSpotMaxPrice: !Not [!Equals [!Ref SpotMaxPrice, ""]]
-  HasSubnetOverride: !Not [!Equals [!Ref SubnetId, ""]]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Globals
@@ -217,10 +216,7 @@ Resources:
           LOCAL_BASE_MODEL: !Ref LocalBaseModel
           ARTIFACTS_BUCKET: !Ref TrainingArtifactsBucket
           CODE_BUCKET: !Ref TrainingCodeBucket
-          SUBNET_ID: !If
-            - HasSubnetOverride
-            - !Ref SubnetId
-            - !ImportValue "tarun-teamweave-shared:LambdaSubnetAz1Id"
+          SUBNET_ID: !Ref SubnetId
           SECURITY_GROUP_ID: !GetAtt TrainingSecurityGroup.GroupId
           INSTANCE_PROFILE_ARN: !GetAtt EC2TrainingInstanceProfile.Arn
           DEFAULT_INSTANCE_TYPE: !Ref DefaultTrainingInstanceType

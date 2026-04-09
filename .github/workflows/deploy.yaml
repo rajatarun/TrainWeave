@@ -72,23 +72,25 @@ jobs:
         with:
           use-installer: true
 
-      # ── Resolve VPC from shared stack subnet ─────────────────────────────────
-      # Reads LambdaSubnetAz1Id from the shared stack, then looks up its VPC.
-      # This avoids requiring a VpcId export in the shared stack.
-      - name: Resolve VPC from shared stack
+      # ── Resolve VPC and subnet from shared stack ──────────────────────────────
+      # Uses describe-stacks (works for any output, exported or not) to read
+      # LambdaSubnetAz1Id, then derives VpcId via describe-subnets.
+      - name: Resolve VPC and subnet from shared stack
         id: resolve-vpc
         run: |
-          SUBNET_ID=$(aws cloudformation list-exports \
+          SUBNET_ID=$(aws cloudformation describe-stacks \
+            --stack-name tarun-teamweave-shared \
             --region "$AWS_REGION" \
-            --query "Exports[?Name=='tarun-teamweave-shared:LambdaSubnetAz1Id'].Value" \
+            --query "Stacks[0].Outputs[?OutputKey=='LambdaSubnetAz1Id'].OutputValue" \
             --output text)
           VPC_ID=$(aws ec2 describe-subnets \
             --region "$AWS_REGION" \
             --subnet-ids "$SUBNET_ID" \
             --query "Subnets[0].VpcId" \
             --output text)
+          echo "subnet_id=$SUBNET_ID" >> "$GITHUB_OUTPUT"
           echo "vpc_id=$VPC_ID" >> "$GITHUB_OUTPUT"
-          echo "Derived VPC $VPC_ID from subnet $SUBNET_ID (tarun-teamweave-shared:LambdaSubnetAz1Id)"
+          echo "Subnet: $SUBNET_ID  VPC: $VPC_ID"
 
       # ── Resolve Deep Learning AMI ─────────────────────────────────────────────
       # Try known AWS naming patterns in order of preference; fall back to listing
@@ -162,6 +164,7 @@ jobs:
             --parameter-overrides \
               GlobalBaseModel="$GLOBAL_BASE_MODEL" \
               LocalBaseModel="$LOCAL_BASE_MODEL" \
+              SubnetId="${{ steps.resolve-vpc.outputs.subnet_id }}" \
               VpcId="${{ steps.resolve-vpc.outputs.vpc_id }}" \
               TrainingAmiId="${{ steps.resolve-ami.outputs.ami_id }}"
 
