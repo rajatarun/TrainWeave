@@ -72,6 +72,24 @@ jobs:
         with:
           use-installer: true
 
+      # ── Resolve VPC from shared stack subnet ─────────────────────────────────
+      # Reads LambdaSubnetAz1Id from the shared stack, then looks up its VPC.
+      # This avoids requiring a VpcId export in the shared stack.
+      - name: Resolve VPC from shared stack
+        id: resolve-vpc
+        run: |
+          SUBNET_ID=$(aws cloudformation list-exports \
+            --region "$AWS_REGION" \
+            --query "Exports[?Name=='tarun-teamweave-shared:LambdaSubnetAz1Id'].Value" \
+            --output text)
+          VPC_ID=$(aws ec2 describe-subnets \
+            --region "$AWS_REGION" \
+            --subnet-ids "$SUBNET_ID" \
+            --query "Subnets[0].VpcId" \
+            --output text)
+          echo "vpc_id=$VPC_ID" >> "$GITHUB_OUTPUT"
+          echo "Derived VPC $VPC_ID from subnet $SUBNET_ID (tarun-teamweave-shared:LambdaSubnetAz1Id)"
+
       # ── Resolve Deep Learning AMI ─────────────────────────────────────────────
       # Try known AWS naming patterns in order of preference; fall back to listing
       # available names so the filter can be updated if AWS renames the series.
@@ -144,6 +162,7 @@ jobs:
             --parameter-overrides \
               GlobalBaseModel="$GLOBAL_BASE_MODEL" \
               LocalBaseModel="$LOCAL_BASE_MODEL" \
+              VpcId="${{ steps.resolve-vpc.outputs.vpc_id }}" \
               TrainingAmiId="${{ steps.resolve-ami.outputs.ami_id }}"
 
       # ── Get stack outputs ─────────────────────────────────────────────────────
