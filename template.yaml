@@ -205,7 +205,7 @@ Resources:
       CodeUri: src/orchestrator/
       Role: !GetAtt OrchestratorFunctionRole.Arn
       MemorySize: 128
-      Timeout: 30
+      Timeout: 60
       Description: >
         Resolves effective base model, builds EC2 UserData, and launches a
         single EC2 Spot GPU instance per training job. Async — returns
