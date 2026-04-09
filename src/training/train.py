@@ -187,7 +187,7 @@ def load_model_and_tokenizer(model_id: str):
         quantization_config=bnb_config,
         device_map="auto",          # distributes across available GPUs/CPU
         trust_remote_code=True,     # needed for some custom architectures
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
     )
 
     # Required before adding LoRA layers: re-casts layer norms, enables
@@ -257,6 +257,12 @@ def train(args: argparse.Namespace) -> None:
     model = apply_lora(model, r=args.r, lora_alpha=args.lora_alpha, lora_dropout=args.lora_dropout)
 
     # ── Training arguments ───────────────────────────────────────────────────
+    # warmup_ratio was removed in transformers 5.2; compute warmup_steps (int)
+    # instead — compatible with all transformers versions.
+    steps_per_epoch = max(1, len(dataset) // (args.batch_size * args.grad_accum))
+    total_steps = steps_per_epoch * args.epochs
+    warmup_steps = max(1, int(0.03 * total_steps))
+
     training_args = SFTConfig(
         output_dir=args.output_dir,
         num_train_epochs=args.epochs,
@@ -264,7 +270,7 @@ def train(args: argparse.Namespace) -> None:
         gradient_accumulation_steps=args.grad_accum,
         learning_rate=args.lr,
         lr_scheduler_type="cosine",
-        warmup_ratio=0.03,
+        warmup_steps=warmup_steps,
         fp16=False,
         bf16=True,              # bfloat16 is more numerically stable than fp16
         optim="paged_adamw_8bit",  # 8-bit AdamW from bitsandbytes — lower VRAM
@@ -289,11 +295,12 @@ def train(args: argparse.Namespace) -> None:
     ]
 
     # ── Trainer ──────────────────────────────────────────────────────────────
+    # TRL ≥ 0.10 renamed `tokenizer` → `processing_class`; use the new name.
     trainer = SFTTrainer(
         model=model,
         args=training_args,
         train_dataset=dataset,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         callbacks=callbacks,
     )
 
