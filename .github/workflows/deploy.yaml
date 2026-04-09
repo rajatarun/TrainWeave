@@ -81,9 +81,16 @@ jobs:
           AMI_ID=$(aws ec2 describe-images \
             --region "$AWS_REGION" \
             --owners amazon \
-            --filters "Name=name,Values=Deep Learning AMI GPU PyTorch*Amazon Linux 2*" \
+            --filters \
+              "Name=name,Values=Deep Learning AMI GPU PyTorch*" \
+              "Name=architecture,Values=x86_64" \
+              "Name=state,Values=available" \
             --query "sort_by(Images,&CreationDate)[-1].ImageId" \
             --output text)
+          if [ -z "$AMI_ID" ] || [ "$AMI_ID" = "None" ]; then
+            echo "ERROR: No Deep Learning AMI GPU PyTorch x86_64 found in $AWS_REGION" >&2
+            exit 1
+          fi
           echo "ami_id=$AMI_ID" >> "$GITHUB_OUTPUT"
           echo "Resolved Deep Learning AMI: $AMI_ID"
 
