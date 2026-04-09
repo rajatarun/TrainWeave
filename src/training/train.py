@@ -187,7 +187,7 @@ def load_model_and_tokenizer(model_id: str):
         quantization_config=bnb_config,
         device_map="auto",          # distributes across available GPUs/CPU
         trust_remote_code=True,     # needed for some custom architectures
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
     )
 
     # Required before adding LoRA layers: re-casts layer norms, enables
@@ -289,11 +289,12 @@ def train(args: argparse.Namespace) -> None:
     ]
 
     # ── Trainer ──────────────────────────────────────────────────────────────
+    # TRL ≥ 0.10 renamed `tokenizer` → `processing_class`; use the new name.
     trainer = SFTTrainer(
         model=model,
         args=training_args,
         train_dataset=dataset,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         callbacks=callbacks,
     )
 
