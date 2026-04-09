@@ -286,11 +286,11 @@ Outputs:
     Value: !GetAtt OrchestratorFunction.Arn
 
   TrainingArtifactsBucketName:
-    Description: S3 bucket for adapter outputs and checkpoints (DeletionPolicy: Retain)
+    Description: "S3 bucket for adapter outputs and checkpoints (DeletionPolicy: Retain)"
     Value: !Ref TrainingArtifactsBucket
 
   TrainingCodeBucketName:
-    Description: S3 bucket for training code — bootstrap.sh, train.py (DeletionPolicy: Retain)
+    Description: "S3 bucket for training code — bootstrap.sh, train.py (DeletionPolicy: Retain)"
     Value: !Ref TrainingCodeBucket
 
   EC2TrainingInstanceProfileArn:
