@@ -20,37 +20,22 @@ Parameters:
 
   LocalBaseModel:
     Type: String
-    Default: "Qwen/Qwen2.5-0.5B-Instruct"
+    Default: ""
     Description: >
       If non-empty, overrides GlobalBaseModel for every training run.
       Useful for pinning a specific model revision or a private model path.
+      Leave empty to use GlobalBaseModel.
 
-  # Storage
-  TrainingArtifactsBucket:
-    Type: String
-    Description: S3 bucket for adapter outputs and checkpoints (must already exist).
-
-  TrainingCodeBucket:
-    Type: String
-    Description: >
-      S3 bucket holding training code (bootstrap.sh, train.py).
-      Deploy step: aws s3 sync src/training/ s3://BUCKET/training/
-
-  # Networking — reference existing resources; do NOT create new ones
-  VpcId:
-    Type: AWS::EC2::VPC::Id
-    Description: >
-      Existing VPC ID. Not used by Lambda (which runs outside VPC), but
-      referenced for documentation and SecurityGroup validation.
-
+  # Networking — SubnetId defaults to shared stack output; VpcId is derived from subnet
   SubnetId:
-    Type: AWS::EC2::Subnet::Id
+    Type: String
+    Default: ""
     Description: >
-      Private subnet for EC2 Spot instances. Must route outbound traffic
-      through the existing NAT instance (not a NAT Gateway).
-      Recommended: LambdaSubnetAz1Id from tarun-teamweave-shared stack
-      (subnet-01714c0c1b4590e4e). S3 traffic uses the existing VPC gateway
-      endpoint (vpce-0c0989507284dc612) — zero NAT data-transfer cost.
+      Private subnet for EC2 Spot instances. Leave empty to use LambdaSubnetAz1Id
+      from the tarun-teamweave-shared stack output (subnet-01714c0c1b4590e4e).
+      Must route outbound traffic through the existing NAT instance.
+      S3 traffic uses the VPC gateway endpoint (vpce-0c0989507284dc612) —
+      zero NAT data-transfer cost. VpcId is derived from the subnet automatically.
 
   SecurityGroupId:
     Type: AWS::EC2::SecurityGroup::Id
@@ -103,9 +88,9 @@ Parameters:
 # Conditions
 # ─────────────────────────────────────────────────────────────────────────────
 Conditions:
-  # Used to conditionally attach key pair in RunInstances call
   HasKeyPair: !Not [!Equals [!Ref KeyPairName, ""]]
   HasSpotMaxPrice: !Not [!Equals [!Ref SpotMaxPrice, ""]]
+  HasSubnetOverride: !Not [!Equals [!Ref SubnetId, ""]]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Globals
@@ -119,6 +104,22 @@ Globals:
 # Resources
 # ─────────────────────────────────────────────────────────────────────────────
 Resources:
+
+  # ── S3 bucket for training adapter outputs and checkpoints ─────────────────
+  TrainingArtifactsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-artifacts-${AWS::AccountId}-${AWS::Region}"
+
+  # ── S3 bucket for training code (bootstrap.sh, train.py) ───────────────────
+  TrainingCodeBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-code-${AWS::AccountId}-${AWS::Region}"
 
   # ── CloudWatch log group (explicit so retention is controlled) ──────────────
   OrchestratorLogGroup:
@@ -202,7 +203,10 @@ Resources:
           LOCAL_BASE_MODEL: !Ref LocalBaseModel
           ARTIFACTS_BUCKET: !Ref TrainingArtifactsBucket
           CODE_BUCKET: !Ref TrainingCodeBucket
-          SUBNET_ID: !Ref SubnetId
+          SUBNET_ID: !If
+            - HasSubnetOverride
+            - !Ref SubnetId
+            - !ImportValue "tarun-teamweave-shared:LambdaSubnetAz1Id"
           SECURITY_GROUP_ID: !Ref SecurityGroupId
           INSTANCE_PROFILE_ARN: !GetAtt EC2TrainingInstanceProfile.Arn
           DEFAULT_INSTANCE_TYPE: !Ref DefaultTrainingInstanceType
@@ -235,7 +239,7 @@ Resources:
                 Action:
                   - s3:GetObject
                   - s3:HeadObject
-                Resource: !Sub "arn:aws:s3:::${TrainingCodeBucket}/*"
+                Resource: !Sub "${TrainingCodeBucket.Arn}/*"
 
               # Read/list artifacts bucket (for checkpoint resume if needed)
               # and write adapter outputs + checkpoints
@@ -247,8 +251,8 @@ Resources:
                   - s3:PutObject
                   - s3:ListBucket
                 Resource:
-                  - !Sub "arn:aws:s3:::${TrainingArtifactsBucket}"
-                  - !Sub "arn:aws:s3:::${TrainingArtifactsBucket}/*"
+                  - !GetAtt TrainingArtifactsBucket.Arn
+                  - !Sub "${TrainingArtifactsBucket.Arn}/*"
 
               # Write training logs to CloudWatch
               - Sid: CloudWatchLogs
@@ -280,6 +284,14 @@ Outputs:
   OrchestratorFunctionArn:
     Description: Lambda function ARN
     Value: !GetAtt OrchestratorFunction.Arn
+
+  TrainingArtifactsBucketName:
+    Description: S3 bucket for adapter outputs and checkpoints (DeletionPolicy: Retain)
+    Value: !Ref TrainingArtifactsBucket
+
+  TrainingCodeBucketName:
+    Description: S3 bucket for training code — bootstrap.sh, train.py (DeletionPolicy: Retain)
+    Value: !Ref TrainingCodeBucket
 
   EC2TrainingInstanceProfileArn:
     Description: Instance profile ARN attached to every training EC2 instance

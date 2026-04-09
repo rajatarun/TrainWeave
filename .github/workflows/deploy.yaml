@@ -17,7 +17,7 @@ on:
       local_base_model:
         description: "Local/private base model override (empty = use global)"
         required: false
-        default: "Qwen/Qwen2.5-0.5B-Instruct"
+        default: ""
       skip_training:
         description: "Set to 'true' to deploy infrastructure only, skip training"
         required: false
@@ -45,11 +45,8 @@ env:
   GLOBAL_BASE_MODEL: ${{ inputs.global_base_model || vars.GLOBAL_BASE_MODEL || 'Qwen/Qwen2.5-0.5B-Instruct' }}
   LOCAL_BASE_MODEL: ${{ inputs.local_base_model || vars.LOCAL_BASE_MODEL || '' }}
 
-  # Infrastructure — set these as GitHub Actions secrets
-  TRAINING_ARTIFACTS_BUCKET: ${{ secrets.TRAINING_ARTIFACTS_BUCKET }}
-  TRAINING_CODE_BUCKET: ${{ secrets.TRAINING_CODE_BUCKET }}
-  VPC_ID: ${{ secrets.VPC_ID }}
-  SUBNET_ID: ${{ secrets.SUBNET_ID }}              # subnet-01714c0c1b4590e4e (LambdaSubnetAz1Id)
+  # Networking — SecurityGroupId is required; SubnetId defaults to shared stack output
+  # (tarun-teamweave-shared:LambdaSubnetAz1Id). S3 buckets are created by the stack.
   SECURITY_GROUP_ID: ${{ secrets.SECURITY_GROUP_ID }}
   TRAINING_AMI_ID: ${{ secrets.TRAINING_AMI_ID }}  # Deep Learning AMI for us-east-1
 
@@ -87,6 +84,8 @@ jobs:
       # ── SAM deploy ────────────────────────────────────────────────────────────
       # Idempotent: re-running deploy on an unchanged stack is a no-op.
       # --no-fail-on-empty-changeset prevents failures when nothing changed.
+      # S3 buckets are created by the stack with DeletionPolicy: Retain.
+      # SubnetId defaults to tarun-teamweave-shared:LambdaSubnetAz1Id if not overridden.
       - name: Deploy SAM stack
         run: |
           sam deploy \
@@ -98,24 +97,30 @@ jobs:
             --parameter-overrides \
               GlobalBaseModel="$GLOBAL_BASE_MODEL" \
               LocalBaseModel="$LOCAL_BASE_MODEL" \
-              TrainingArtifactsBucket="$TRAINING_ARTIFACTS_BUCKET" \
-              TrainingCodeBucket="$TRAINING_CODE_BUCKET" \
-              VpcId="$VPC_ID" \
-              SubnetId="$SUBNET_ID" \
               SecurityGroupId="$SECURITY_GROUP_ID" \
               TrainingAmiId="$TRAINING_AMI_ID"
 
       # ── Get stack outputs ─────────────────────────────────────────────────────
-      - name: Get orchestrator function name
+      - name: Get stack outputs
         id: stack-outputs
         run: |
-          FUNCTION_NAME=$(aws cloudformation describe-stacks \
+          OUTPUTS=$(aws cloudformation describe-stacks \
             --stack-name "$SAM_STACK_NAME" \
             --region "$AWS_REGION" \
-            --query "Stacks[0].Outputs[?OutputKey=='OrchestratorFunctionName'].OutputValue" \
-            --output text)
+            --query "Stacks[0].Outputs" \
+            --output json)
+
+          FUNCTION_NAME=$(echo "$OUTPUTS" | jq -r '.[] | select(.OutputKey=="OrchestratorFunctionName") | .OutputValue')
+          ARTIFACTS_BUCKET=$(echo "$OUTPUTS" | jq -r '.[] | select(.OutputKey=="TrainingArtifactsBucketName") | .OutputValue')
+          CODE_BUCKET=$(echo "$OUTPUTS" | jq -r '.[] | select(.OutputKey=="TrainingCodeBucketName") | .OutputValue')
+
           echo "function_name=$FUNCTION_NAME" >> "$GITHUB_OUTPUT"
+          echo "artifacts_bucket=$ARTIFACTS_BUCKET" >> "$GITHUB_OUTPUT"
+          echo "code_bucket=$CODE_BUCKET" >> "$GITHUB_OUTPUT"
+
           echo "Orchestrator function: $FUNCTION_NAME"
+          echo "Artifacts bucket: $ARTIFACTS_BUCKET"
+          echo "Code bucket: $CODE_BUCKET"
 
       # ── Upload training code to S3 ────────────────────────────────────────────
       # bootstrap.sh and train.py live in the code bucket so the EC2 instance
@@ -123,11 +128,12 @@ jobs:
       # Re-uploading on every deploy is cheap and ensures code stays in sync.
       - name: Upload training code to S3
         run: |
+          CODE_BUCKET="${{ steps.stack-outputs.outputs.code_bucket }}"
           aws s3 sync src/training/ \
-            "s3://$TRAINING_CODE_BUCKET/training/" \
+            "s3://$CODE_BUCKET/training/" \
             --delete \
             --region "$AWS_REGION"
-          echo "Training code uploaded to s3://$TRAINING_CODE_BUCKET/training/"
+          echo "Training code uploaded to s3://$CODE_BUCKET/training/"
 
       # ── Training runs ─────────────────────────────────────────────────────────
       # Each step invokes the Lambda asynchronously (--invocation-type Event).
@@ -158,7 +164,7 @@ jobs:
             /dev/null
 
           echo "Launched training job: $JOB_ID"
-          echo "Adapter will be uploaded to: s3://$TRAINING_ARTIFACTS_BUCKET/adapters/$JOB_ID/"
+          echo "Adapter will be uploaded to: s3://${{ steps.stack-outputs.outputs.artifacts_bucket }}/adapters/$JOB_ID/"
 
       - name: Train — dataset-b (API JSON)
         if: ${{ inputs.skip_training != 'true' }}
@@ -181,7 +187,7 @@ jobs:
             /dev/null
 
           echo "Launched training job: $JOB_ID"
-          echo "Adapter will be uploaded to: s3://$TRAINING_ARTIFACTS_BUCKET/adapters/$JOB_ID/"
+          echo "Adapter will be uploaded to: s3://${{ steps.stack-outputs.outputs.artifacts_bucket }}/adapters/$JOB_ID/"
 
       - name: Train — dataset-c (tool calling)
         if: ${{ inputs.skip_training != 'true' }}
@@ -204,7 +210,7 @@ jobs:
             /dev/null
 
           echo "Launched training job: $JOB_ID"
-          echo "Adapter will be uploaded to: s3://$TRAINING_ARTIFACTS_BUCKET/adapters/$JOB_ID/"
+          echo "Adapter will be uploaded to: s3://${{ steps.stack-outputs.outputs.artifacts_bucket }}/adapters/$JOB_ID/"
 
       # ── Summary ───────────────────────────────────────────────────────────────
       - name: Print summary
@@ -217,5 +223,5 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "**Monitor progress:**" >> "$GITHUB_STEP_SUMMARY"
           echo "- EC2 console → filter by tag \`trainweave:project=trainweave\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- S3: \`s3://$TRAINING_ARTIFACTS_BUCKET/adapters/\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- S3: \`s3://${{ steps.stack-outputs.outputs.artifacts_bucket }}/adapters/\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- CloudWatch Logs: \`/aws/lambda/trainweave-orchestrator\`" >> "$GITHUB_STEP_SUMMARY"
