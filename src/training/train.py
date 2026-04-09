@@ -248,11 +248,15 @@ def train(args: argparse.Namespace) -> None:
     # ── Load model + tokenizer ───────────────────────────────────────────────
     model, tokenizer = load_model_and_tokenizer(args.model_id)
 
+    # Cap sequence length on the tokenizer — works across all TRL versions.
+    # max_seq_length was removed from SFTConfig in TRL ≥ 0.10; setting it
+    # here ensures SFTTrainer truncates correctly regardless of installed version.
+    tokenizer.model_max_length = args.max_seq_len
+
     # ── Apply LoRA ───────────────────────────────────────────────────────────
     model = apply_lora(model, r=args.r, lora_alpha=args.lora_alpha, lora_dropout=args.lora_dropout)
 
     # ── Training arguments ───────────────────────────────────────────────────
-    # SFTConfig extends TrainingArguments with tokenization/packing options.
     training_args = SFTConfig(
         output_dir=args.output_dir,
         num_train_epochs=args.epochs,
@@ -268,7 +272,6 @@ def train(args: argparse.Namespace) -> None:
         save_strategy="steps",
         save_steps=args.checkpoint_steps,
         save_total_limit=3,     # keep last 3 checkpoints to cap disk usage
-        max_seq_length=args.max_seq_len,
         dataset_text_field="text",
         packing=False,          # disable packing for simplicity; enable for speed
         report_to="none",       # no WandB/MLflow — keeps dependencies minimal
