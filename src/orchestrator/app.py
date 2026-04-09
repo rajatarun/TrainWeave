@@ -86,6 +86,7 @@ def _launch_instance(run_kwargs: dict) -> tuple[dict, str]:
 
 
 
+def _resolve_effective_model(local: str, global_: str) -> str:
     """Return local model if set, otherwise fall back to global model."""
     stripped = local.strip()
     if stripped:
