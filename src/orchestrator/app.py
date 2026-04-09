@@ -65,7 +65,27 @@ def _run_instances_with_retry(run_kwargs: dict, max_retries: int = 4) -> dict:
                 raise
 
 
-def _resolve_effective_model(local: str, global_: str) -> str:
+def _launch_instance(run_kwargs: dict) -> tuple[dict, str]:
+    """
+    Try spot first; fall back to on-demand if spot quota is exhausted.
+
+    Returns (response, market_type) where market_type is 'spot' or 'on-demand'.
+    """
+    try:
+        response = _run_instances_with_retry(run_kwargs)
+        return response, "spot"
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] in _SPOT_RETRYABLE:
+            logger.warning(
+                "Spot exhausted after retries (%s) — falling back to on-demand",
+                exc.response["Error"]["Code"],
+            )
+            on_demand_kwargs = {k: v for k, v in run_kwargs.items() if k != "InstanceMarketOptions"}
+            return ec2.run_instances(**on_demand_kwargs), "on-demand"
+        raise
+
+
+
     """Return local model if set, otherwise fall back to global model."""
     stripped = local.strip()
     if stripped:
@@ -210,13 +230,13 @@ def handler(event: dict, context) -> dict:
     if key_pair:
         run_kwargs["KeyName"] = key_pair
 
-    # ── Launch spot instance ───────────────────────────────────────────────────
-    response = _run_instances_with_retry(run_kwargs)
+    # ── Launch instance (spot with on-demand fallback) ─────────────────────────
+    response, market_type = _launch_instance(run_kwargs)
     instance_id: str = response["Instances"][0]["InstanceId"]
 
     logger.info(
-        "EC2 Spot instance launched | instance_id=%s job_id=%s",
-        instance_id, job_id,
+        "EC2 instance launched | market=%s instance_id=%s job_id=%s",
+        market_type, instance_id, job_id,
     )
 
     result = {
@@ -225,6 +245,7 @@ def handler(event: dict, context) -> dict:
         "effective_model": effective_model,
         "dataset_name": dataset_name,
         "instance_type": instance_type,
+        "market_type": market_type,
         "artifacts_prefix": f"s3://{os.environ['ARTIFACTS_BUCKET']}/adapters/{job_id}/",
     }
     logger.info("Response: %s", json.dumps(result))
