@@ -17,7 +17,7 @@ on:
       local_base_model:
         description: "Local/private base model override (empty = use global)"
         required: false
-        default: ""
+        default: "Qwen/Qwen2.5-0.5B-Instruct"
       skip_training:
         description: "Set to 'true' to deploy infrastructure only, skip training"
         required: false
