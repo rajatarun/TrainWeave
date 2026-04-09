@@ -203,25 +203,38 @@ jobs:
             --region "$AWS_REGION"
           echo "Training code uploaded to s3://$CODE_BUCKET/training/"
 
+      # ── Upload training datasets to S3 ───────────────────────────────────────
+      # Datasets live in data/ in the repo and are synced to the code bucket
+      # under datasets/. EC2 instances download them via the S3 VPC endpoint.
+      - name: Upload training datasets to S3
+        run: |
+          CODE_BUCKET="${{ steps.stack-outputs.outputs.code_bucket }}"
+          aws s3 sync data/ \
+            "s3://$CODE_BUCKET/datasets/" \
+            --delete \
+            --region "$AWS_REGION"
+          echo "Training datasets uploaded to s3://$CODE_BUCKET/datasets/"
+
       # ── Training runs ─────────────────────────────────────────────────────────
       # Each step invokes the Lambda asynchronously (--invocation-type Event).
       # GitHub Actions does NOT wait for training to complete — instances
       # self-terminate when done. Check S3 for adapter outputs.
       #
-      # To add a new dataset: copy one of these steps, update dataset_name,
-      # dataset_bucket, and dataset_key. No infrastructure changes needed.
+      # To add a new dataset: add a JSONL file under data/<name>/train.jsonl,
+      # copy one of these steps, and update dataset_name / dataset_key.
 
       - name: Train — dataset-a (customer support)
         if: ${{ inputs.skip_training != 'true' }}
         env:
           FUNCTION_NAME: ${{ steps.stack-outputs.outputs.function_name }}
+          CODE_BUCKET: ${{ steps.stack-outputs.outputs.code_bucket }}
         run: |
           JOB_ID="trainweave-dataset-a-$(date -u +%Y%m%d-%H%M%S)"
           PAYLOAD=$(jq -n \
             --arg job_id "$JOB_ID" \
-            --arg dataset_name "dataset-a" \
-            --arg dataset_bucket "my-ml-datasets" \
-            --arg dataset_key "lora/customer-support/train.jsonl" \
+            --arg dataset_name "customer-support" \
+            --arg dataset_bucket "$CODE_BUCKET" \
+            --arg dataset_key "datasets/customer-support/train.jsonl" \
             '{job_id: $job_id, dataset_name: $dataset_name, dataset_bucket: $dataset_bucket, dataset_key: $dataset_key}')
 
           aws lambda invoke \
@@ -238,13 +251,14 @@ jobs:
         if: ${{ inputs.skip_training != 'true' }}
         env:
           FUNCTION_NAME: ${{ steps.stack-outputs.outputs.function_name }}
+          CODE_BUCKET: ${{ steps.stack-outputs.outputs.code_bucket }}
         run: |
           JOB_ID="trainweave-dataset-b-$(date -u +%Y%m%d-%H%M%S)"
           PAYLOAD=$(jq -n \
             --arg job_id "$JOB_ID" \
-            --arg dataset_name "dataset-b" \
-            --arg dataset_bucket "my-ml-datasets" \
-            --arg dataset_key "lora/api-json/train.jsonl" \
+            --arg dataset_name "api-json" \
+            --arg dataset_bucket "$CODE_BUCKET" \
+            --arg dataset_key "datasets/api-json/train.jsonl" \
             '{job_id: $job_id, dataset_name: $dataset_name, dataset_bucket: $dataset_bucket, dataset_key: $dataset_key}')
 
           aws lambda invoke \
@@ -261,13 +275,14 @@ jobs:
         if: ${{ inputs.skip_training != 'true' }}
         env:
           FUNCTION_NAME: ${{ steps.stack-outputs.outputs.function_name }}
+          CODE_BUCKET: ${{ steps.stack-outputs.outputs.code_bucket }}
         run: |
           JOB_ID="trainweave-dataset-c-$(date -u +%Y%m%d-%H%M%S)"
           PAYLOAD=$(jq -n \
             --arg job_id "$JOB_ID" \
-            --arg dataset_name "dataset-c" \
-            --arg dataset_bucket "my-ml-datasets" \
-            --arg dataset_key "lora/tool-calling/train.jsonl" \
+            --arg dataset_name "tool-calling" \
+            --arg dataset_bucket "$CODE_BUCKET" \
+            --arg dataset_key "datasets/tool-calling/train.jsonl" \
             '{job_id: $job_id, dataset_name: $dataset_name, dataset_bucket: $dataset_bucket, dataset_key: $dataset_key}')
 
           aws lambda invoke \
