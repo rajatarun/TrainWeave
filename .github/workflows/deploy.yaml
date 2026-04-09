@@ -73,22 +73,48 @@ jobs:
           use-installer: true
 
       # ── Resolve Deep Learning AMI ─────────────────────────────────────────────
-      # Dynamically find the latest AWS Deep Learning AMI (PyTorch, Amazon Linux 2)
-      # so no TRAINING_AMI_ID secret is needed — always gets the newest available.
+      # Try known AWS naming patterns in order of preference; fall back to listing
+      # available names so the filter can be updated if AWS renames the series.
       - name: Resolve Deep Learning AMI
         id: resolve-ami
         run: |
-          AMI_ID=$(aws ec2 describe-images \
-            --region "$AWS_REGION" \
-            --owners amazon \
-            --filters \
-              "Name=name,Values=Deep Learning AMI GPU PyTorch*" \
-              "Name=architecture,Values=x86_64" \
-              "Name=state,Values=available" \
-            --query "sort_by(Images,&CreationDate)[-1].ImageId" \
-            --output text)
+          find_ami() {
+            aws ec2 describe-images \
+              --region "$AWS_REGION" \
+              --owners amazon \
+              --filters \
+                "Name=name,Values=$1" \
+                "Name=architecture,Values=x86_64" \
+                "Name=state,Values=available" \
+              --query "sort_by(Images,&CreationDate)[-1].ImageId" \
+              --output text
+          }
+
+          for PATTERN in \
+            "Deep Learning AMI GPU PyTorch*" \
+            "AWS Deep Learning AMI*PyTorch*" \
+            "Deep Learning OSS Nvidia Driver AMI*PyTorch*" \
+            "*Deep*Learning*PyTorch*x86_64*"; do
+            AMI_ID=$(find_ami "$PATTERN")
+            if [ -n "$AMI_ID" ] && [ "$AMI_ID" != "None" ]; then
+              AMI_NAME=$(aws ec2 describe-images --region "$AWS_REGION" \
+                --image-ids "$AMI_ID" --query "Images[0].Name" --output text)
+              echo "Resolved Deep Learning AMI: $AMI_ID ($AMI_NAME)"
+              break
+            fi
+          done
+
           if [ -z "$AMI_ID" ] || [ "$AMI_ID" = "None" ]; then
-            echo "ERROR: No Deep Learning AMI GPU PyTorch x86_64 found in $AWS_REGION" >&2
+            echo "ERROR: No Deep Learning PyTorch AMI found. Available Deep Learning AMIs in $AWS_REGION:" >&2
+            aws ec2 describe-images \
+              --region "$AWS_REGION" \
+              --owners amazon \
+              --filters \
+                "Name=name,Values=*Deep*Learning*" \
+                "Name=architecture,Values=x86_64" \
+                "Name=state,Values=available" \
+              --query "sort_by(Images,&CreationDate)[-5:].Name" \
+              --output text >&2
             exit 1
           fi
           echo "ami_id=$AMI_ID" >> "$GITHUB_OUTPUT"
