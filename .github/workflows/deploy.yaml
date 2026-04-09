@@ -240,6 +240,7 @@ jobs:
           aws lambda invoke \
             --function-name "$FUNCTION_NAME" \
             --invocation-type Event \
+            --cli-binary-format raw-in-base64-out \
             --payload "$PAYLOAD" \
             --region "$AWS_REGION" \
             /dev/null
@@ -264,6 +265,7 @@ jobs:
           aws lambda invoke \
             --function-name "$FUNCTION_NAME" \
             --invocation-type Event \
+            --cli-binary-format raw-in-base64-out \
             --payload "$PAYLOAD" \
             --region "$AWS_REGION" \
             /dev/null
@@ -288,6 +290,7 @@ jobs:
           aws lambda invoke \
             --function-name "$FUNCTION_NAME" \
             --invocation-type Event \
+            --cli-binary-format raw-in-base64-out \
             --payload "$PAYLOAD" \
             --region "$AWS_REGION" \
             /dev/null
