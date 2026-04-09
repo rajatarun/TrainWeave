@@ -122,6 +122,15 @@ set -euo pipefail
 exec > >(tee /var/log/trainweave-userdata.log) 2>&1
 echo "[trainweave-userdata] Starting job $JOB_ID on $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
+# ── Terminate on any error before bootstrap.sh is reached ───────────────────
+_ud_terminate() {{
+    IIDENT=$(curl -sf --max-time 5 http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || true)
+    echo "[trainweave-userdata] Fatal error — terminating ${{IIDENT:-instance}}"
+    [[ -n "$IIDENT" ]] && aws ec2 terminate-instances --instance-ids "$IIDENT" --region "$AWS_DEFAULT_REGION" 2>/dev/null || true
+    shutdown -h now
+}}
+trap '_ud_terminate' ERR
+
 # ── Pull and run bootstrap ────────────────────────────────────────────────────
 # S3 traffic routes through the VPC gateway endpoint (no NAT cost).
 aws s3 cp "s3://$CODE_BUCKET/training/bootstrap.sh" /tmp/trainweave-bootstrap.sh

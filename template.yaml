@@ -276,6 +276,18 @@ Resources:
                   - logs:DescribeLogStreams
                 Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/trainweave/*:*"
 
+              # Self-terminate via EC2 API at end of training (more reliable
+              # than shutdown -h now on newer AMIs). Scoped to instances tagged
+              # by this project so the permission cannot be abused broadly.
+              - Sid: SelfTerminate
+                Effect: Allow
+                Action:
+                  - ec2:TerminateInstances
+                Resource: !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/trainweave:project: trainweave
+
   # ── Instance profile wrapping the EC2 role ─────────────────────────────────
   EC2TrainingInstanceProfile:
     Type: AWS::IAM::InstanceProfile
