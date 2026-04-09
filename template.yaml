@@ -26,7 +26,7 @@ Parameters:
       Useful for pinning a specific model revision or a private model path.
       Leave empty to use GlobalBaseModel.
 
-  # Networking — SubnetId defaults to shared stack output; VpcId is derived from subnet
+  # Networking — both SubnetId and VpcId default to shared stack outputs
   SubnetId:
     Type: String
     Default: ""
@@ -35,13 +35,7 @@ Parameters:
       from the tarun-teamweave-shared stack output (subnet-01714c0c1b4590e4e).
       Must route outbound traffic through the existing NAT instance.
       S3 traffic uses the VPC gateway endpoint (vpce-0c0989507284dc612) —
-      zero NAT data-transfer cost. VpcId is derived from the subnet automatically.
-
-  SecurityGroupId:
-    Type: AWS::EC2::SecurityGroup::Id
-    Description: >
-      Security group for EC2 training instances. Must allow outbound HTTPS
-      (443) for pip/HuggingFace downloads and AWS API calls.
+      zero NAT data-transfer cost.
 
   # EC2 training instance configuration
   DefaultTrainingInstanceType:
@@ -104,6 +98,18 @@ Globals:
 # Resources
 # ─────────────────────────────────────────────────────────────────────────────
 Resources:
+
+  # ── Security group for EC2 training instances ──────────────────────────────
+  TrainingSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: trainweave-training-sg
+      GroupDescription: Outbound-only security group for TrainWeave EC2 training instances
+      VpcId: !ImportValue "tarun-teamweave-shared:VpcId"
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: "0.0.0.0/0"
+          Description: "Allow all outbound (pip, HuggingFace, AWS APIs, S3 via VPC endpoint)"
 
   # ── S3 bucket for training adapter outputs and checkpoints ─────────────────
   TrainingArtifactsBucket:
@@ -207,7 +213,7 @@ Resources:
             - HasSubnetOverride
             - !Ref SubnetId
             - !ImportValue "tarun-teamweave-shared:LambdaSubnetAz1Id"
-          SECURITY_GROUP_ID: !Ref SecurityGroupId
+          SECURITY_GROUP_ID: !GetAtt TrainingSecurityGroup.GroupId
           INSTANCE_PROFILE_ARN: !GetAtt EC2TrainingInstanceProfile.Arn
           DEFAULT_INSTANCE_TYPE: !Ref DefaultTrainingInstanceType
           SPOT_MAX_PRICE: !Ref SpotMaxPrice
@@ -292,6 +298,10 @@ Outputs:
   TrainingCodeBucketName:
     Description: "S3 bucket for training code — bootstrap.sh, train.py (DeletionPolicy: Retain)"
     Value: !Ref TrainingCodeBucket
+
+  TrainingSecurityGroupId:
+    Description: Security group ID attached to every training EC2 instance
+    Value: !GetAtt TrainingSecurityGroup.GroupId
 
   EC2TrainingInstanceProfileArn:
     Description: Instance profile ARN attached to every training EC2 instance

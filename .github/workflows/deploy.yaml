@@ -45,9 +45,7 @@ env:
   GLOBAL_BASE_MODEL: ${{ inputs.global_base_model || vars.GLOBAL_BASE_MODEL || 'Qwen/Qwen2.5-0.5B-Instruct' }}
   LOCAL_BASE_MODEL: ${{ inputs.local_base_model || vars.LOCAL_BASE_MODEL || '' }}
 
-  # Networking — SecurityGroupId is required; SubnetId defaults to shared stack output
-  # (tarun-teamweave-shared:LambdaSubnetAz1Id). S3 buckets are created by the stack.
-  SECURITY_GROUP_ID: ${{ secrets.SECURITY_GROUP_ID }}
+  # SubnetId and SecurityGroup default to shared stack outputs; S3 buckets created by stack.
   TRAINING_AMI_ID: ${{ secrets.TRAINING_AMI_ID }}  # Deep Learning AMI for us-east-1
 
 jobs:
@@ -97,7 +95,6 @@ jobs:
             --parameter-overrides \
               GlobalBaseModel="$GLOBAL_BASE_MODEL" \
               LocalBaseModel="$LOCAL_BASE_MODEL" \
-              SecurityGroupId="$SECURITY_GROUP_ID" \
               TrainingAmiId="$TRAINING_AMI_ID"
 
       # ── Get stack outputs ─────────────────────────────────────────────────────
