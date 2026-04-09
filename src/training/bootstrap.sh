@@ -128,8 +128,11 @@ fi
 OUTPUT_DIR="$WORKDIR/output"
 mkdir -p "$OUTPUT_DIR"
 
+PYTHON=$(command -v python3 || command -v python)
+log "Python: $PYTHON ($($PYTHON --version 2>&1))"
+
 log "Starting training | model=${EFFECTIVE_MODEL}"
-python "$WORKDIR/train.py" \
+$PYTHON "$WORKDIR/train.py" \
     --model-id        "${EFFECTIVE_MODEL}" \
     --dataset-path    "$DATASET_PATH" \
     --output-dir      "$OUTPUT_DIR" \
