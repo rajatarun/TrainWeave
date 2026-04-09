@@ -13,6 +13,7 @@ Parameters:
   # Model resolution — LocalBaseModel overrides GlobalBaseModel when non-empty
   GlobalBaseModel:
     Type: String
+    Default: "Qwen/Qwen2.5-0.5B-Instruct"
     Description: >
       HuggingFace model ID used when LocalBaseModel is empty.
       Example: Qwen/Qwen2.5-0.5B-Instruct
