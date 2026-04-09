@@ -248,6 +248,10 @@ jobs:
           echo "Launched training job: $JOB_ID"
           echo "Adapter will be uploaded to: s3://${{ steps.stack-outputs.outputs.artifacts_bucket }}/adapters/$JOB_ID/"
 
+      - name: Stagger before dataset-b
+        if: ${{ inputs.skip_training != 'true' }}
+        run: sleep 10
+
       - name: Train — dataset-b (API JSON)
         if: ${{ inputs.skip_training != 'true' }}
         env:
@@ -272,6 +276,10 @@ jobs:
 
           echo "Launched training job: $JOB_ID"
           echo "Adapter will be uploaded to: s3://${{ steps.stack-outputs.outputs.artifacts_bucket }}/adapters/$JOB_ID/"
+
+      - name: Stagger before dataset-c
+        if: ${{ inputs.skip_training != 'true' }}
+        run: sleep 10
 
       - name: Train — dataset-c (tool calling)
         if: ${{ inputs.skip_training != 'true' }}
