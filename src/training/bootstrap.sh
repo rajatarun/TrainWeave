@@ -31,15 +31,27 @@ log() { echo "[trainweave $(date -u +%H:%M:%SZ)] $*"; }
 # Uses the EC2 API for termination — more reliable than shutdown -h now on
 # newer AMIs where systemd may defer the halt. Falls back to shutdown if the
 # metadata service or CLI is unavailable.
+# Always uploads the log to S3 first so failures are diagnosable post-mortem.
 _terminate() {
+    local exit_code=${1:-0}
     IIDENT=$(curl -sf --max-time 5 http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || true)
+
+    # Upload log to S3 before terminating so it survives instance deletion
+    if [[ -n "${ARTIFACTS_BUCKET:-}" && -n "${JOB_ID:-}" ]]; then
+        local log_key="logs/${JOB_ID}/bootstrap.log"
+        aws s3 cp "$LOGFILE" "s3://${ARTIFACTS_BUCKET}/${log_key}" \
+            --region "${AWS_DEFAULT_REGION:-us-east-1}" 2>/dev/null || true
+        log "Log uploaded to s3://${ARTIFACTS_BUCKET}/${log_key}"
+    fi
+
     if [[ -n "$IIDENT" ]]; then
-        log "Terminating instance $IIDENT via EC2 API"
-        aws ec2 terminate-instances --instance-ids "$IIDENT" --region "$AWS_DEFAULT_REGION" 2>/dev/null || true
+        log "Terminating instance $IIDENT via EC2 API (exit_code=$exit_code)"
+        aws ec2 terminate-instances --instance-ids "$IIDENT" \
+            --region "${AWS_DEFAULT_REGION:-us-east-1}" 2>/dev/null || true
     fi
     shutdown -h now
 }
-trap 'log "ERROR at line $LINENO (exit $?). Terminating to avoid idle cost."; _terminate' ERR
+trap 'log "ERROR at line $LINENO (exit $?). Terminating to avoid idle cost."; _terminate 1' ERR
 
 log "Bootstrap started | JOB_ID=${JOB_ID}"
 log "Instance: $(curl -sf http://169.254.169.254/latest/meta-data/instance-id)"
@@ -137,7 +149,6 @@ aws s3 sync "$OUTPUT_DIR/" "$ADAPTER_S3_PATH" --exclude "checkpoint-*"
 log "Adapter uploaded. Job ${JOB_ID} finished successfully."
 
 # ── 7. Self-terminate ─────────────────────────────────────────────────────────
-# Terminate via the EC2 API first (immediate); shutdown -h now is the fallback
-# in case the metadata service or IAM credentials are momentarily unavailable.
-log "Job ${JOB_ID} finished successfully. Terminating instance."
-_terminate
+# _terminate uploads the log to S3 then kills the instance.
+log "Job ${JOB_ID} complete. Uploading log and terminating."
+_terminate 0
