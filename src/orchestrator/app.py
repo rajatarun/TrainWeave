@@ -23,14 +23,46 @@ import base64
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
 
 import boto3
+from botocore.exceptions import ClientError
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 ec2 = boto3.client("ec2")
+
+# Spot errors that are worth retrying (transient capacity/limit issues)
+_SPOT_RETRYABLE = {
+    "MaxSpotInstanceCountExceeded",
+    "InsufficientInstanceCapacity",
+    "SpotMaxPriceTooLow",
+}
+
+
+def _run_instances_with_retry(run_kwargs: dict, max_retries: int = 4) -> dict:
+    """
+    Call ec2.run_instances with exponential backoff on transient spot errors.
+
+    Retries up to max_retries times (delays: 2s, 4s, 8s, 16s).
+    Raises the original exception if retries are exhausted.
+    """
+    for attempt in range(max_retries + 1):
+        try:
+            return ec2.run_instances(**run_kwargs)
+        except ClientError as exc:
+            code = exc.response["Error"]["Code"]
+            if code in _SPOT_RETRYABLE and attempt < max_retries:
+                delay = 2 ** (attempt + 1)  # 2, 4, 8, 16 s
+                logger.warning(
+                    "Spot error %s (attempt %d/%d) — retrying in %ds",
+                    code, attempt + 1, max_retries, delay,
+                )
+                time.sleep(delay)
+            else:
+                raise
 
 
 def _resolve_effective_model(local: str, global_: str) -> str:
@@ -179,7 +211,7 @@ def handler(event: dict, context) -> dict:
         run_kwargs["KeyName"] = key_pair
 
     # ── Launch spot instance ───────────────────────────────────────────────────
-    response = ec2.run_instances(**run_kwargs)
+    response = _run_instances_with_retry(run_kwargs)
     instance_id: str = response["Instances"][0]["InstanceId"]
 
     logger.info(
