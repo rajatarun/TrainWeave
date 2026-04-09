@@ -111,6 +111,7 @@ jobs:
           sam deploy \
             --stack-name "$SAM_STACK_NAME" \
             --region "$AWS_REGION" \
+            --resolve-s3 \
             --no-confirm-changeset \
             --no-fail-on-empty-changeset \
             --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
