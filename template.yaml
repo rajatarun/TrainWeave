@@ -26,7 +26,8 @@ Parameters:
       Useful for pinning a specific model revision or a private model path.
       Leave empty to use GlobalBaseModel.
 
-  # Networking — both SubnetId and VpcId default to shared stack outputs
+  # Networking — SubnetId and VpcId are derived by the pipeline from the shared
+  # stack's LambdaSubnetAz1Id export. Do not set these manually.
   SubnetId:
     Type: String
     Default: ""
@@ -36,6 +37,13 @@ Parameters:
       Must route outbound traffic through the existing NAT instance.
       S3 traffic uses the VPC gateway endpoint (vpce-0c0989507284dc612) —
       zero NAT data-transfer cost.
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: >
+      VPC for the training security group. Automatically derived in the pipeline
+      from the LambdaSubnetAz1Id subnet in the tarun-teamweave-shared stack.
+      Do not set manually — the pipeline resolves this via ec2:DescribeSubnets.
 
   # EC2 training instance configuration
   DefaultTrainingInstanceType:
@@ -105,7 +113,7 @@ Resources:
     Properties:
       GroupName: trainweave-training-sg
       GroupDescription: Outbound-only security group for TrainWeave EC2 training instances
-      VpcId: !ImportValue "tarun-teamweave-shared:VpcId"
+      VpcId: !Ref VpcId
       SecurityGroupEgress:
         - IpProtocol: "-1"
           CidrIp: "0.0.0.0/0"
