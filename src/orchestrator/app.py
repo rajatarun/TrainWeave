@@ -216,6 +216,20 @@ def handler(event: dict, context) -> dict:
         # Instance shuts down → terminate. Paired with `shutdown -h now` in
         # bootstrap.sh. No ec2:TerminateInstances permission needed.
         "InstanceInitiatedShutdownBehavior": "terminate",
+        # Explicitly delete the root EBS volume on termination so no storage
+        # cost accrues after the job completes. Ubuntu Deep Learning AMIs use
+        # /dev/sda1 as the root device. gp3 at 150 GB covers the AMI (~75 GB)
+        # + pip packages + model weights (up to ~14 GB for 7B) + checkpoints.
+        "BlockDeviceMappings": [
+            {
+                "DeviceName": "/dev/sda1",
+                "Ebs": {
+                    "DeleteOnTermination": True,
+                    "VolumeType": "gp3",
+                    "VolumeSize": 150,
+                },
+            },
+        ],
         "InstanceMarketOptions": {
             "MarketType": "spot",
             "SpotOptions": spot_options,
@@ -232,7 +246,15 @@ def handler(event: dict, context) -> dict:
                     {"Key": "trainweave:model", "Value": effective_model},
                     {"Key": "trainweave:project", "Value": "trainweave"},
                 ],
-            }
+            },
+            {
+                "ResourceType": "volume",
+                "Tags": [
+                    {"Key": "Name", "Value": f"trainweave-{job_id}"},
+                    {"Key": "trainweave:job-id", "Value": job_id},
+                    {"Key": "trainweave:project", "Value": "trainweave"},
+                ],
+            },
         ],
     }
 
