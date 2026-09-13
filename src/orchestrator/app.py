@@ -17,6 +17,7 @@ Environment variables (set by SAM template):
   SPOT_MAX_PRICE         Max spot bid; empty = AWS automatic (on-demand cap)
   TRAINING_AMI_ID        Deep Learning AMI ID
   KEY_PAIR_NAME          SSH key pair; empty = no key (production default)
+  ADAPTER_CATALOG_TABLE  DeployWeave adapter catalogue table; empty = do not register
 """
 
 import base64
@@ -29,10 +30,22 @@ from datetime import datetime, timezone
 import boto3
 from botocore.exceptions import ClientError
 
+import dpo_dataset
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 ec2 = boto3.client("ec2")
+
+# Created on first use — only DPO dataset sources need S3.
+_s3_client = None
+
+
+def _s3():
+    global _s3_client
+    if _s3_client is None:
+        _s3_client = boto3.client("s3")
+    return _s3_client
 
 # Spot errors that are worth retrying (transient capacity/limit issues)
 _SPOT_RETRYABLE = {
@@ -84,6 +97,67 @@ def _launch_instance(run_kwargs: dict) -> tuple[dict, str]:
             return ec2.run_instances(**on_demand_kwargs), "on-demand"
         raise
 
+
+
+def _materialise_dpo_dataset(job_id: str, source: dict) -> tuple[str, str, dict]:
+    """Convert TeamWeave DPO records into a trainable dataset in the artifacts bucket.
+
+    Writes two objects under ``datasets/{job_id}/``:
+      - ``train.jsonl``      Alpaca SFT rows built from the *chosen* response.
+                             This is the file the EC2 job trains on.
+      - ``train.dpo.jsonl``  ``{prompt, chosen, rejected}`` preference rows,
+                             preserved for a future DPO objective. Nothing
+                             trains on it today (see dpo_dataset module docs).
+
+    Returns ``(dataset_bucket, dataset_key, provenance)``.
+    """
+    bucket = (source.get("bucket") or "").strip()
+    prefix = (source.get("prefix") or "").strip()
+    if not bucket or not prefix:
+        raise ValueError("dataset_source of type 'dpo' requires both 'bucket' and 'prefix'")
+
+    keys = dpo_dataset.list_record_keys(_s3(), bucket, prefix)
+    if not keys:
+        raise ValueError(f"No DPO records found under s3://{bucket}/{prefix}")
+
+    conversion = dpo_dataset.convert_records(dpo_dataset.load_records(_s3(), bucket, keys))
+    if not conversion.sft_rows:
+        raise ValueError(
+            f"All {len(keys)} DPO record(s) under s3://{bucket}/{prefix} were unusable "
+            "(missing prompt or chosen response)"
+        )
+
+    artifacts_bucket = os.environ["ARTIFACTS_BUCKET"]
+    sft_key = f"datasets/{job_id}/{dpo_dataset.SFT_DATASET_FILENAME}"
+    pairs_key = f"datasets/{job_id}/{dpo_dataset.DPO_DATASET_FILENAME}"
+
+    _s3().put_object(
+        Bucket=artifacts_bucket,
+        Key=sft_key,
+        Body=dpo_dataset.to_jsonl(conversion.sft_rows).encode("utf-8"),
+        ContentType="application/x-ndjson",
+    )
+    _s3().put_object(
+        Bucket=artifacts_bucket,
+        Key=pairs_key,
+        Body=dpo_dataset.to_jsonl(conversion.dpo_rows).encode("utf-8"),
+        ContentType="application/x-ndjson",
+    )
+
+    logger.info(
+        "DPO dataset materialised | records=%d sft_rows=%d dpo_pairs=%d skipped=%d "
+        "sft=s3://%s/%s pairs=s3://%s/%s",
+        len(keys), len(conversion.sft_rows), len(conversion.dpo_rows), conversion.skipped,
+        artifacts_bucket, sft_key, artifacts_bucket, pairs_key,
+    )
+
+    provenance = {
+        "dpo_source_bucket": bucket,
+        "dpo_source_prefix": prefix,
+        "dpo_record_count": len(conversion.sft_rows),
+        "dpo_pairs_key": pairs_key,
+    }
+    return artifacts_bucket, sft_key, provenance
 
 
 def _resolve_effective_model(local: str, global_: str) -> str:
@@ -145,21 +219,37 @@ def handler(event: dict, context) -> dict:
     Event schema:
     {
         "dataset_name":   "dataset-a",           # required
-        "dataset_bucket": "my-ml-datasets",       # required
-        "dataset_key":    "lora/cs/train.jsonl",  # required
+        "dataset_bucket": "my-ml-datasets",       # required unless dataset_source is set
+        "dataset_key":    "lora/cs/train.jsonl",  # required unless dataset_source is set
+        "dataset_source": {                       # optional; derives the dataset instead
+            "type":   "dpo",                      #   only "dpo" is supported today
+            "bucket": "teamweave-dpo-training",   #   TeamWeave DPO_TRAINING_BUCKET
+            "prefix": "teamweave/visibility/draft"  # {project}/{team}/{step_id}
+        },
         "instance_type":  "g4dn.xlarge",          # optional override
         "job_id":         "my-custom-job-id"      # optional; auto-generated if absent
         "hf_token":       "hf_..."                # optional; for gated models
     }
+
+    With ``dataset_source`` the TeamWeave preference records under the prefix
+    are converted to an Alpaca SFT dataset (chosen responses only) which the
+    EC2 job trains on, plus a companion ``train.dpo.jsonl`` of
+    ``{prompt, chosen, rejected}`` rows that nothing trains on yet. The
+    training objective is unchanged — see ``dpo_dataset`` for the rationale.
     """
     # ── Validate required fields ───────────────────────────────────────────────
-    for field in ("dataset_name", "dataset_bucket", "dataset_key"):
+    dataset_source: dict = event.get("dataset_source") or {}
+    if dataset_source and dataset_source.get("type") != "dpo":
+        raise ValueError(
+            f"Unsupported dataset_source type: {dataset_source.get('type')!r} (expected 'dpo')"
+        )
+
+    required = ("dataset_name",) if dataset_source else ("dataset_name", "dataset_bucket", "dataset_key")
+    for field in required:
         if not event.get(field):
             raise ValueError(f"Missing required event field: {field}")
 
     dataset_name: str = event["dataset_name"]
-    dataset_bucket: str = event["dataset_bucket"]
-    dataset_key: str = event["dataset_key"]
     instance_type: str = event.get("instance_type") or os.environ["DEFAULT_INSTANCE_TYPE"]
     hf_token: str = event.get("hf_token", "")
 
@@ -170,9 +260,19 @@ def handler(event: dict, context) -> dict:
     )
 
     # ── Build deterministic job ID ─────────────────────────────────────────────
+    # Computed before the dataset is resolved: a derived DPO dataset is written
+    # under datasets/{job_id}/ so each run keeps its own immutable copy.
     job_id: str = event.get("job_id") or (
         f"trainweave-{dataset_name}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
     )
+
+    # ── Resolve dataset (explicit S3 object, or derived from DPO records) ──────
+    provenance: dict = {}
+    if dataset_source:
+        dataset_bucket, dataset_key, provenance = _materialise_dpo_dataset(job_id, dataset_source)
+    else:
+        dataset_bucket = event["dataset_bucket"]
+        dataset_key = event["dataset_key"]
 
     logger.info(
         "Launching training job | job_id=%s dataset=%s model=%s instance=%s",
@@ -192,6 +292,16 @@ def handler(event: dict, context) -> dict:
     # Only inject HF_TOKEN if provided — avoids empty env var breaking HF CLI
     if hf_token:
         env_vars["HF_TOKEN"] = hf_token
+
+    # Adapter registration in DeployWeave's catalogue is opt-in: bootstrap.sh
+    # skips it (with a log line) when ADAPTER_CATALOG_TABLE is empty.
+    catalog_table = os.environ.get("ADAPTER_CATALOG_TABLE", "").strip()
+    if catalog_table:
+        env_vars["ADAPTER_CATALOG_TABLE"] = catalog_table
+        env_vars["DATASET_NAME"] = dataset_name
+        env_vars["DATASET_SOURCE_TYPE"] = "dpo" if dataset_source else "s3"
+        for key, value in provenance.items():
+            env_vars[key.upper()] = str(value)
 
     userdata = _build_userdata(env_vars)
 
@@ -276,9 +386,11 @@ def handler(event: dict, context) -> dict:
         "job_id": job_id,
         "effective_model": effective_model,
         "dataset_name": dataset_name,
+        "dataset_uri": f"s3://{dataset_bucket}/{dataset_key}",
         "instance_type": instance_type,
         "market_type": market_type,
         "artifacts_prefix": f"s3://{os.environ['ARTIFACTS_BUCKET']}/adapters/{job_id}/",
+        **provenance,
     }
     logger.info("Response: %s", json.dumps(result))
     return result
