@@ -97,6 +97,17 @@ Parameters:
       bucket, enabling dataset_source={"type":"dpo",...} invocations.
       Leave empty to disable the DPO dataset source.
 
+  # Integration: register trained adapters with DeployWeave (edge E5)
+  AdapterCatalogTableName:
+    Type: String
+    Default: ""
+    Description: >
+      DeployWeave adapter catalogue DynamoDB table (its ADAPTER_TABLE,
+      default deployweave-adapter-catalog). When set, a training instance
+      upserts an item describing the adapter it just uploaded, which makes it
+      resolvable by DeployWeave's adapter_resolver. Leave empty to skip
+      registration — bootstrap.sh logs the skip and the job still succeeds.
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Conditions
 # ─────────────────────────────────────────────────────────────────────────────
@@ -104,6 +115,7 @@ Conditions:
   HasKeyPair: !Not [!Equals [!Ref KeyPairName, ""]]
   HasSpotMaxPrice: !Not [!Equals [!Ref SpotMaxPrice, ""]]
   HasDPOBucket: !Not [!Equals [!Ref DPOTrainingBucketName, ""]]
+  HasAdapterCatalog: !Not [!Equals [!Ref AdapterCatalogTableName, ""]]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Globals
@@ -258,6 +270,7 @@ Resources:
           SPOT_MAX_PRICE: !Ref SpotMaxPrice
           TRAINING_AMI_ID: !Ref TrainingAmiId
           KEY_PAIR_NAME: !Ref KeyPairName
+          ADAPTER_CATALOG_TABLE: !Ref AdapterCatalogTableName
           AWS_ACCOUNT_ID: !Ref AWS::AccountId
 
   # ── IAM role for EC2 training instances ────────────────────────────────────
@@ -310,6 +323,18 @@ Resources:
                   - logs:PutLogEvents
                   - logs:DescribeLogStreams
                 Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/trainweave/*:*"
+
+              # Upsert the trained adapter into DeployWeave's catalogue after
+              # the S3 upload succeeds. Only PutItem, only on that one table,
+              # and only when the integration is switched on.
+              - !If
+                - HasAdapterCatalog
+                - Sid: RegisterAdapterInDeployWeave
+                  Effect: Allow
+                  Action:
+                    - dynamodb:PutItem
+                  Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AdapterCatalogTableName}"
+                - !Ref AWS::NoValue
 
               # Self-terminate via EC2 API at end of training (more reliable
               # than shutdown -h now on newer AMIs). Scoped to instances tagged
