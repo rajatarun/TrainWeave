@@ -151,6 +151,17 @@ aws s3 sync "$OUTPUT_DIR/" "$ADAPTER_S3_PATH" --exclude "checkpoint-*"
 
 log "Adapter uploaded. Job ${JOB_ID} finished successfully."
 
+# ── 6b. Register the adapter in DeployWeave's catalogue ──────────────────────
+# Runs only after the upload above succeeded — the catalogue must never point
+# at an adapter that is not in S3. Opt-in: register_adapter.py logs and exits 0
+# when ADAPTER_CATALOG_TABLE is unset. A registration failure is logged but
+# does not fail the job; the adapter itself is already safely in S3.
+log "Pulling register_adapter.py from s3://${CODE_BUCKET}/training/register_adapter.py"
+aws s3 cp "s3://${CODE_BUCKET}/training/register_adapter.py" "$WORKDIR/register_adapter.py"
+if ! $PYTHON "$WORKDIR/register_adapter.py" --adapter-s3-uri "$ADAPTER_S3_PATH"; then
+    log "WARNING: adapter registration failed — adapter is in S3 but not catalogued."
+fi
+
 # ── 7. Self-terminate ─────────────────────────────────────────────────────────
 # _terminate uploads the log to S3 then kills the instance.
 log "Job ${JOB_ID} complete. Uploading log and terminating."
