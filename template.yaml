@@ -86,12 +86,24 @@ Parameters:
       EC2 key pair for SSH access. Leave empty in production — instances
       self-terminate and have no persistent state. Only set for debugging.
 
+  # Integration: TeamWeave DPO pairs as a dataset source (edge E6)
+  DPOTrainingBucketName:
+    Type: String
+    Default: ""
+    Description: >
+      S3 bucket TeamWeave's dpo_collector writes chosen/rejected records to
+      (its DPO_TRAINING_BUCKET). When set, the orchestrator Lambda is allowed
+      to read those records and write the derived dataset into the artifacts
+      bucket, enabling dataset_source={"type":"dpo",...} invocations.
+      Leave empty to disable the DPO dataset source.
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Conditions
 # ─────────────────────────────────────────────────────────────────────────────
 Conditions:
   HasKeyPair: !Not [!Equals [!Ref KeyPairName, ""]]
   HasSpotMaxPrice: !Not [!Equals [!Ref SpotMaxPrice, ""]]
+  HasDPOBucket: !Not [!Equals [!Ref DPOTrainingBucketName, ""]]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Globals
@@ -185,6 +197,29 @@ Resources:
                 Condition:
                   StringEquals:
                     ec2:CreateAction: RunInstances
+
+              # Read TeamWeave DPO records and write the derived dataset.
+              # Only present when DPOTrainingBucketName is set — the default
+              # deployment keeps the Lambda free of any S3 permission.
+              - !If
+                - HasDPOBucket
+                - Sid: ReadDPORecords
+                  Effect: Allow
+                  Action:
+                    - s3:GetObject
+                    - s3:ListBucket
+                  Resource:
+                    - !Sub "arn:aws:s3:::${DPOTrainingBucketName}"
+                    - !Sub "arn:aws:s3:::${DPOTrainingBucketName}/*"
+                - !Ref AWS::NoValue
+              - !If
+                - HasDPOBucket
+                - Sid: WriteDerivedDataset
+                  Effect: Allow
+                  Action:
+                    - s3:PutObject
+                  Resource: !Sub "${TrainingArtifactsBucket.Arn}/datasets/*"
+                - !Ref AWS::NoValue
 
               # Pass the EC2 instance profile to the launched instance
               - Sid: PassEC2InstanceRole
