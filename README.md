@@ -111,7 +111,7 @@ labels hold:
 #    shows up as "inconsistent", not as agreement). Writes audit.json and
 #    pairs.verified.jsonl under audits/{id}/ in the DPO bucket. Exit 3 = did not pass.
 python scripts/audit_dpo_labels.py --bucket teamweave-dpo-training \
-    --prefix teamweave/visibility/draft --judge-model <stronger-model-id> --sample 200
+    --prefix teamweave/visibility/draft --sample 200
 
 # 2. Train on the verified pairs
 aws lambda invoke --function-name "$FUNCTION" --invocation-type Event --payload '{
@@ -123,9 +123,17 @@ aws lambda invoke --function-name "$FUNCTION" --invocation-type Event --payload 
 # 3. Did it help? Judge adapter vs base on held-out prompts, same both-orders rule
 python scripts/eval_reliability.py generate --base <model> --adapter ./adapter \
     --prompts heldout.jsonl --out gens.jsonl          # on a GPU box
-python scripts/eval_reliability.py score gens.jsonl --judge-model <id> --expect-json \
+python scripts/eval_reliability.py score gens.jsonl --expect-json \
     --train-pairs pairs.verified.jsonl
 ```
+
+**The judge is Claude Sonnet 4.6** (`us.anthropic.claude-sonnet-4-6`) unless
+`--judge-model` says otherwise: the strongest model this account can call
+(TeamWeave's model map lists Sonnet 5 and Opus 5 as unavailable), and
+stronger than the Haiku 4.5 that writes the Visibility team's drafts and
+edits. TeamWeave's planning agents run on Sonnet 4.6 too, so for pairs from
+those steps pass `--judge-model deepseek.v3.2` — a different family — rather
+than let a model grade itself.
 
 `labels_hold` means the lower bound of the 95% interval on judge agreement
 clears 0.7 over at least 30 decisive pairs; the orchestrator also checks the

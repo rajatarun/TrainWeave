@@ -17,7 +17,7 @@ held-out prompts, the same way the labels were audited -- a judge in both orders
 
   python scripts/eval_reliability.py generate --base Qwen/Qwen2.5-0.5B-Instruct \\
       --adapter ./adapter --prompts heldout.jsonl --out gens.jsonl
-  python scripts/eval_reliability.py score gens.jsonl --judge-model <id> --expect-json
+  python scripts/eval_reliability.py score gens.jsonl --expect-json   # judge: Sonnet 4.6
 
 The verdict is ``improved`` only when the interval's lower bound clears 0.5.
 Held-out prompts must not overlap the training pairs; ``score`` refuses a
@@ -115,7 +115,8 @@ def main(argv=None) -> int:
     g.add_argument("--max-new-tokens", type=int, default=512)
     s = sub.add_parser("score")
     s.add_argument("generations")
-    s.add_argument("--judge-model", required=True)
+    s.add_argument("--judge-model", default=label_audit.DEFAULT_JUDGE_MODEL,
+                   help="must not be the base model being evaluated")
     s.add_argument("--region", default="us-east-1")
     s.add_argument("--expect-json", action="store_true")
     s.add_argument("--train-pairs", default=None)
