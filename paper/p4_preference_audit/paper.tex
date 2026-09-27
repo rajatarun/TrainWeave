@@ -13,7 +13,7 @@
 
 \begin{document}
 
-\title{Before Training on Heuristic Preferences:\\ A Position-Robust Judge Audit for Self-Improving Agent Loops}
+\title{Before Training on Heuristic Preferences:\\ A Position-Robust Judge Audit\\ for Self-Improving Agent Loops}
 
 \author{\IEEEauthorblockN{Tarun Raja}
 \IEEEauthorblockA{\pend{Affiliation} \\ \pend{email}}}
@@ -29,7 +29,7 @@ preference learning, DPO, LLM-as-a-judge, label noise, position bias, self-impro
 \end{IEEEkeywords}
 
 \section{Introduction}
-Self-improving agent systems close a loop: they generate outputs, rank them, and train on the ranking. TeamWeave's collector invokes a step twice and prefers the answer with the lower risk score. That score is a heuristic built from lexical indicators and designed as a \emph{gate}. When the two scores differ by more than 0.4, the pair is uploaded, and TrainWeave can turn it into a fine-tuning dataset.
+Self-improving agent systems built on large language models (LLMs) close a loop: they generate outputs, rank them, and train on the ranking. TeamWeave's collector invokes a step twice and prefers the answer with the lower risk score. That score is a heuristic built from lexical indicators and designed as a \emph{gate}. When the two scores differ by more than 0.4, the pair is uploaded, and TrainWeave can turn it into a fine-tuning dataset.
 
 This paper asks whether those labels are good enough to train on. It also asks how to find out before spending GPU time, and how to find out afterwards whether training helped. Our contributions are:
 \begin{enumerate}
@@ -44,7 +44,7 @@ DPO~\cite{rafailov2023} optimizes a policy directly from pairwise preferences un
 
 \section{What DPO on Heuristic Labels Learns}\label{sec:dpo}
 \begin{proposition}[DPO learns the labeling function]\label{prop:dpo}
-Suppose the preference data satisfy $\Pr(y_1\succ y_2\mid x)=\sigma(g(x,y_1)-g(x,y_2))$ for a function $g$, and the policy class contains the maximizer. Then the population DPO objective with reference $\pi_{\mathrm{ref}}$ and temperature $\beta$ is maximized by $\pi^*(y\mid x)\propto\pi_{\mathrm{ref}}(y\mid x)\exp(g(x,y)/\beta)$. If the labels come from a heuristic, $g=-\kappa h$ for the heuristic's risk $h$, so the trained policy up-weights low-$h$ outputs exponentially in $\kappa/\beta$, whether or not low $h$ means better.
+Suppose the preference data satisfy $\Pr(y_1\succ y_2\mid x)=\sigma(g(x,y_1)-g(x,y_2))$ for a function $g$, and the policy class contains the maximizer. Then the population DPO objective with reference $\pi_{\mathrm{ref}}$ and temperature $\beta$ is maximized by $\pi^*(y\mid x)\propto\pi_{\mathrm{ref}}(y\mid x)\exp(g(x,y)/\beta)$. If the labels come from a heuristic, $g=-\kappa h$ for the heuristic's risk $h$ and some scale $\kappa>0$ (how sharply the labels follow $h$), so the trained policy up-weights low-$h$ outputs exponentially in $\kappa/\beta$, whether or not low $h$ means better.
 \end{proposition}
 \begin{proof}
 Rafailov et al.~\cite{rafailov2023} show that the DPO loss equals the Bradley--Terry negative log-likelihood of the implicit reward $\hat r(x,y)=\beta\log(\pi(y\mid x)/\pi_{\mathrm{ref}}(y\mid x))$. Under the stated preference model, the population likelihood is maximized when the reward differences match those of $g$, i.e.\ $\hat r=g+c(x)$, since Bradley--Terry rewards are identified up to a per-prompt constant. Solving $\beta\log(\pi/\pi_{\mathrm{ref}})=g+c(x)$ for $\pi$ and normalizing gives $\pi^*$. With deterministic heuristic labels ($\Pr=\mathbb 1[h(y_1)<h(y_2)]$), the model is the $\kappa\to\infty$ limit, and $\pi^*$ concentrates on the minimizers of $h$ in $\pi_{\mathrm{ref}}$'s support.
@@ -89,7 +89,7 @@ $L$ is non-decreasing in $k$, and $\{L\ge\tau\}\subseteq\{L\ge p\}$ when $p\le\t
 \end{proof}
 
 \section{A Collection Defect and Its Effect}\label{sec:defect}
-The collector treated a missing risk score as $+\infty$. With exactly one side missing, the score difference was infinite, cleared every threshold, and was uploaded; \texttt{json.dumps} then wrote \texttt{Infinity}, which is not JSON. The pipeline still returned the scored answer, which is reasonable. But the uploaded \emph{label} recorded only which side the scorer managed to score.
+The collector treated a missing risk score as $+\infty$. With exactly one side missing, the score difference was infinite, cleared every threshold, and was uploaded; \texttt{json.dumps} then wrote \texttt{Infinity}, which is not valid JavaScript Object Notation (JSON). The pipeline still returned the scored answer, which is reasonable. But the uploaded \emph{label} recorded only which side the scorer managed to score.
 
 \begin{proposition}[Missingness labels dilute agreement]\label{prop:missing}
 Suppose a fraction $m$ of pairs are labeled by missingness, and whether a response gets scored is independent of which response the judge prefers. The remaining pairs have agreement $p$. Then the audited agreement is $(1-m)p+m/2$.
@@ -100,18 +100,18 @@ For a missingness-labeled pair, the chosen side is the scored side. It coincides
 The fix skips the upload whenever either score is missing, while still returning the scored answer. Records now also carry \texttt{label\_source}, so an audit can state what decided each label.
 
 \section{Closing the Loop}\label{sec:loop}
-The orchestrator accepts \texttt{objective: dpo} only with a reference to an audit whose decision is \emph{labels\_hold} and whose source bucket and prefix match the dataset. An audit of one team's pairs does not license training on another's. Training then uses only the judge-agreed pairs, with TRL's DPOTrainer and the adapter-disabled base model as reference. The prompt template is shared with the SFT path and tested, so both objectives condition on the same format.
+The orchestrator accepts \texttt{objective: dpo} only with a reference to an audit whose decision is \emph{labels\_hold} and whose source bucket and prefix match the dataset. An audit of one team's pairs does not license training on another's. Training then uses only the judge-agreed pairs, with the DPOTrainer of the TRL (Transformer Reinforcement Learning) library and the adapter-disabled base model as reference. The prompt template is shared with the supervised fine-tuning (SFT) path and tested, so both objectives condition on the same format.
 
 \textbf{Reliability protocol.} On held-out prompts disjoint from the training pairs (enforced), the adapter and the base model each answer. The same position-swapped judge compares them. The verdict is \emph{improved} only when the lower end of the 95\% Wilson interval on the adapter's decisive win rate exceeds $\tfrac12$. For structured steps, the fraction of answers that parse as JSON is reported alongside.
 
 \textbf{Judge choice.} Sonnet 4.6 is the strongest model available in our deployment. It is stronger than the Haiku 4.5 that writes the drafts of the content-drafting team whose pairs we audit. Pairs from steps that Sonnet 4.6 itself generates are audited with DeepSeek V3.2 instead, a different model family, so no model grades its own outputs.
 
 \section{Monte Carlo Study of the Audit}\label{sec:mc}
-We simulated pools of $n$ sampled pairs in which the heuristic label agrees with the truly better response with probability $p$. The judge is correct on content, and answers ``first'' with probability $b$ per call. With $b=0$ every sampled pair yields a decisive verdict, so in Table~\ref{tab:power} $n$ is both the number of pairs sampled and the number of decisive verdicts. In Table~\ref{tab:bias}, $n=200$ pairs are sampled and the decisive count falls with $b$. Each cell is 300 trials.
+We simulated pools of $n$ sampled pairs in which the heuristic label agrees with the truly better response with probability $p$. The judge is correct on content, and answers ``first'' with probability $b$ per call. With $b=0$ every sampled pair yields a decisive verdict, so in Table~\ref{tab:power} $n$ is both the number of pairs sampled and the number of decisive verdicts. In Table~\ref{tab:bias}, $n=200$ pairs are sampled and the decisive count falls with $b$. Each cell is 300 trials. The two tables come from separate runs with different random seeds, so the cell they share ($n=200$, $p=0.85$, $b=0$) reads 0.997 in Table~\ref{tab:power} and 1.000 in Table~\ref{tab:bias}; the difference is one trial in 300.
 
 \begin{table}[t]
 \centering
-\caption{Probability that the audit returns \emph{labels\_hold} ($b=0$, $\tau=0.7$; $n$ pairs sampled, all decisive).}
+\caption{Probability that the audit returns \texttt{labels\_hold} ($b=0$, $\tau=0.7$; $n$ pairs sampled, all decisive).}
 \label{tab:power}
 \begin{tabular}{lrrrrrrr}
 \toprule
@@ -140,7 +140,7 @@ $b$ & pass rate & consistency & decisive & agreement\\
 \end{tabular}
 \end{table}
 
-\textbf{Results.} At the threshold ($p=\tau=0.7$), the false-pass rate is 0.7--3.3\%, near the 2.5\% of Proposition~\ref{prop:falsepass}; the Wilson approximation is slightly liberal at $n=200$. Below it, no trial passed. Table~\ref{tab:bias} confirms Theorem~\ref{thm:swap}. The agreement estimate stays at 0.85 at every bias level. Consistency tracks $1-b$ exactly, and the decisive count falls as $200(1-b)$. The pass rate drops only because fewer decisive verdicts widen the interval. A biased judge makes the audit more \emph{conservative}, never wrong.
+\textbf{Results.} At the threshold ($p=\tau=0.7$), the false-pass rate is 0.7--3.3\%, near the 2.5\% of Proposition~\ref{prop:falsepass}. The 3.3\% at $n=200$ is within Monte Carlo error: with 300 trials the standard error of a rate near 2.5\% is about 0.009. Below it, no trial passed. Table~\ref{tab:bias} confirms Theorem~\ref{thm:swap}. The agreement estimate stays at 0.85 at every bias level. Consistency tracks $1-b$ exactly, and the decisive count falls as $200(1-b)$. The pass rate drops only because fewer decisive verdicts widen the interval. A biased judge makes the audit more \emph{conservative}, never wrong.
 
 \section{Future Work}
 The method is ready to run on the pipeline's collected pairs. We plan three steps. (1) Audit the collected pairs, using Sonnet 4.6 for writer and editor steps and DeepSeek V3.2 for planning steps, and report agreement, its interval, and agreement by heuristic delta. (2) If the labels hold, train DPO on the verified pairs and apply the reliability protocol on held-out prompts. (3) If they do not hold, report that finding: a lexical gate is not a preference signal, which answers the question that motivates this work. All code paths are implemented and tested offline.
@@ -149,13 +149,13 @@ The method is ready to run on the pipeline's collected pairs. We plan three step
 Theorem~\ref{thm:swap} models position bias as content-independent. A judge whose bias depends on content (e.g., favoring the longer response) is not covered. Filtering to judge-agreed pairs trains on the intersection of heuristic and judge preferences, a selection that may itself be biased toward pairs that are easy for the judge.
 
 \section{Conclusion}
-Heuristic preference labels encode the heuristic, and DPO will faithfully learn it. A position-swapped judge measures agreement without position bias, and an interval-based rule refuses labels that are not clearly better than chance at the threshold. The loop now trains only on labels that pass, and it will say whether training helped.
+Heuristic preference labels encode the heuristic, and DPO will faithfully learn it. A position-swapped judge measures agreement without position bias, and an interval-based rule refuses labels that are not clearly better than chance at the threshold. The loop now trains only on labels that pass, and the reliability protocol will say whether training helped.
 
 \begin{thebibliography}{99}
-\bibitem{rafailov2023} R.~Rafailov, A.~Sharma, E.~Mitchell, S.~Ermon, C.~D. Manning, and C.~Finn, ``Direct preference optimization: Your language model is secretly a reward model,'' in \emph{Proc. NeurIPS}, 2023.
+\bibitem{rafailov2023} R.~Rafailov, A.~Sharma, E.~Mitchell, S.~Ermon, C.~D. Manning, and C.~Finn, ``Direct preference optimization: Your language model is secretly a reward model,'' in \emph{Proc. NeurIPS}, 2023, pp.~53728--53741.
 \bibitem{bradley1952} R.~A. Bradley and M.~E. Terry, ``Rank analysis of incomplete block designs: I. The method of paired comparisons,'' \emph{Biometrika}, vol.~39, pp.~324--345, 1952.
-\bibitem{zheng2023judge} L.~Zheng \emph{et al.}, ``Judging LLM-as-a-judge with MT-Bench and Chatbot Arena,'' in \emph{Proc. NeurIPS Datasets and Benchmarks}, 2023.
-\bibitem{wang2023fair} P.~Wang \emph{et al.}, ``Large language models are not fair evaluators,'' arXiv:2305.17926, 2023.
+\bibitem{zheng2023judge} L.~Zheng \emph{et al.}, ``Judging LLM-as-a-judge with MT-Bench and Chatbot Arena,'' in \emph{Proc. NeurIPS Datasets and Benchmarks}, 2023, pp.~46595--46623.
+\bibitem{wang2023fair} P.~Wang \emph{et al.}, ``Large language models are not fair evaluators,'' arXiv preprint arXiv:2305.17926, 2023.
 \bibitem{frenay2014} B.~Fr{\'e}nay and M.~Verleysen, ``Classification in the presence of label noise: A survey,'' \emph{IEEE Trans. Neural Netw. Learn. Syst.}, vol.~25, no.~5, pp.~845--869, 2014.
 \bibitem{wilson1927} E.~B. Wilson, ``Probable inference, the law of succession, and statistical inference,'' \emph{J. Amer. Statist. Assoc.}, vol.~22, pp.~209--212, 1927.
 \bibitem{brown2001} L.~D. Brown, T.~T. Cai, and A.~DasGupta, ``Interval estimation for a binomial proportion,'' \emph{Statist. Sci.}, vol.~16, no.~2, pp.~101--133, 2001.
