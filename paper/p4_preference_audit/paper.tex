@@ -1,0 +1,163 @@
+\documentclass[conference]{IEEEtran}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{url}
+\usepackage{xcolor}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\newtheorem{proposition}{Proposition}
+\theoremstyle{remark}
+\newtheorem{remark}{Remark}
+\newcommand{\pend}[1]{\textcolor{red!70!black}{[#1]}}
+
+\begin{document}
+
+\title{Do Heuristic Preferences Make Good Training Data?\\ Auditing and Closing a Self-Improving Agent Loop}
+
+\author{\IEEEauthorblockN{Tarun Raja}
+\IEEEauthorblockA{\pend{Affiliation} \\ \pend{email}}}
+
+\maketitle
+
+\begin{abstract}
+A multi-agent pipeline (TeamWeave) invokes each step twice and keeps the answer with the lower composite risk score, a weighted mean of lexical indicators. It records the pair as a chosen/rejected preference for later fine-tuning (TrainWeave). Whether such heuristic labels are \emph{preferences} at all had not been checked, and nothing trained on them. We close the loop in the order the evidence requires. First, we show that direct preference optimization (DPO) on heuristic labels learns the heuristic: the optimal policy tilts toward whatever the heuristic rewards (Proposition~\ref{prop:dpo}). Second, we give an audit in which a strong judge compares each pair in both orders. We prove that position bias independent of content then changes only \emph{how many} verdicts count, never the measured agreement (Theorem~\ref{thm:swap}). The audit passes the labels only when the lower 95\% Wilson bound on agreement clears 0.7. In a Monte Carlo study, labels whose true agreement sits exactly at the threshold pass in at most 3.3\% of trials. At 85\% agreement the audit passes 94\% of trials with 100 decisive pairs, and 99.7\% with 200. A judge that answers ``first'' 60\% of the time still yields the correct agreement estimate (0.850). Third, we found and fixed a collection defect: when one side lacked a score, a pair was uploaded whose label encoded only which side was scored. We show that such pairs pull audited agreement toward $\tfrac12$ (Proposition~\ref{prop:missing}). The orchestrator now refuses a DPO job without a passing audit of the same data, and trains only on the verified pairs. The real audit, DPO training and reliability evaluation require model and GPU access, and are specified as protocols.
+\end{abstract}
+
+\begin{IEEEkeywords}
+preference learning, DPO, LLM-as-a-judge, label noise, position bias, self-improving agents
+\end{IEEEkeywords}
+
+\section{Introduction}
+Self-improving agent systems close a loop: they generate outputs, rank them, and train on the ranking. TeamWeave's collector invokes a step twice and prefers the answer with the lower \texttt{composite\_risk\_score}. That score is a weighted mean of lexical risk indicators (hedging words, Jaccard disagreement between generations, numeric spread) designed as a \emph{gate}. When the two scores differ by more than 0.4, the pair is uploaded, and TrainWeave can turn it into a fine-tuning dataset.
+
+This paper asks whether those labels are good enough to train on. It also asks how to find out before spending GPU time, and how to find out afterwards whether training helped. Our contributions are:
+\begin{enumerate}
+\item a formal statement of what DPO on heuristic labels optimizes (Section~\ref{sec:dpo});
+\item a position-swapped judge audit with a proof of its bias robustness, and an interval-based pass rule with measured error rates (Sections~\ref{sec:audit},~\ref{sec:mc});
+\item a collection defect, a proof of its effect on the audit, and its fix (Section~\ref{sec:defect});
+\item an enforced gate and a reliability protocol (Section~\ref{sec:loop}).
+\end{enumerate}
+
+\section{Related Work}
+DPO~\cite{rafailov2023} optimizes a policy directly from pairwise preferences under a Bradley--Terry model~\cite{bradley1952}. LLM judges agree with human preferences at useful rates, but show position bias~\cite{zheng2023judge,wang2023fair}. Swapping the order is the standard mitigation, and we prove what it guarantees. Learning from noisy labels is a long-studied problem~\cite{frenay2014}. Interval estimation for a binomial proportion follows Wilson~\cite{wilson1927} and Brown et al.~\cite{brown2001}.
+
+\section{What DPO on Heuristic Labels Learns}\label{sec:dpo}
+\begin{proposition}[DPO learns the labeling function]\label{prop:dpo}
+Suppose the preference data satisfy $\Pr(y_1\succ y_2\mid x)=\sigma(g(x,y_1)-g(x,y_2))$ for a function $g$, and the policy class contains the maximizer. Then the population DPO objective with reference $\pi_{\mathrm{ref}}$ and temperature $\beta$ is maximized by $\pi^*(y\mid x)\propto\pi_{\mathrm{ref}}(y\mid x)\exp(g(x,y)/\beta)$. If the labels come from a heuristic, $g=-\kappa h$ for the heuristic's risk $h$, so the trained policy up-weights low-$h$ outputs exponentially in $\kappa/\beta$, whether or not low $h$ means better.
+\end{proposition}
+\begin{proof}
+Rafailov et al.~\cite{rafailov2023} show that the DPO loss equals the Bradley--Terry negative log-likelihood of the implicit reward $\hat r(x,y)=\beta\log(\pi(y\mid x)/\pi_{\mathrm{ref}}(y\mid x))$. Under the stated preference model, the population likelihood is maximized when the reward differences match those of $g$, i.e.\ $\hat r=g+c(x)$, since Bradley--Terry rewards are identified up to a per-prompt constant. Solving $\beta\log(\pi/\pi_{\mathrm{ref}})=g+c(x)$ for $\pi$ and normalizing gives $\pi^*$. With deterministic heuristic labels ($\Pr=\mathbb 1[h(y_1)<h(y_2)]$), the model is the $\kappa\to\infty$ limit, and $\pi^*$ concentrates on the minimizers of $h$ in $\pi_{\mathrm{ref}}$'s support.
+\end{proof}
+So training on unaudited labels \emph{defines} quality as the heuristic's. For a lexical risk score, that means answers with fewer hedges and fewer numbers.
+
+\section{The Audit}\label{sec:audit}
+For each sampled pair $(x,y_c,y_r)$, a judge $J$ (Claude Sonnet 4.6 by default) is asked twice which response better accomplishes the task: once in the order $(y_c,y_r)$ and once in the order $(y_r,y_c)$, at temperature 0. The two answers are mapped back to ``chosen'', ``rejected'' or ``tie''. The verdict counts only if both orders agree; otherwise it is \emph{inconsistent}. A failed or unreadable call is an \emph{error}, never a verdict.
+
+\begin{theorem}[Position-swap robustness]\label{thm:swap}
+Model each judge call as follows. With probability $b$, independently per call and independently of content, it answers ``the first response''. Otherwise it returns a content verdict $V\in\{\text{chosen},\text{rejected}\}$ with $\Pr(V=\text{chosen})=c$, i.i.d.\ across the two calls. Then
+\begin{align}
+\Pr(\text{verdict}=\text{chosen})&=(1-b)\,c\,[(1-b)c+b],\\
+\Pr(\text{verdict}=\text{rejected})&=(1-b)(1-c)\,[(1-b)(1-c)+b],
+\end{align}
+and the rest is inconsistent. In particular:
+\begin{enumerate}
+\item if content verdicts are deterministic ($c\in\{0,1\}$, as at temperature 0), the agreement among decisive verdicts equals $c$ for every $b<1$. Only the decisive fraction, $1-b$, depends on the bias;
+\item for any $c$, agreement among decisive verdicts exceeds $\tfrac12$ iff $c>\tfrac12$.
+\end{enumerate}
+\end{theorem}
+\begin{proof}
+Order 1 maps ``first'' to chosen, and order 2 maps ``first'' to rejected. There are four cases.
+\begin{itemize}
+\item Neither call is biased, probability $(1-b)^2$: the verdict is $V_1$ if $V_1=V_2$. That is chosen with probability $c^2$ and rejected with probability $(1-c)^2$.
+\item Only call 1 is biased, probability $b(1-b)$: call 1 says chosen, so the verdict is chosen iff $V_2=$ chosen, with probability $c$.
+\item Only call 2 is biased, probability $(1-b)b$: call 2 says rejected, so the verdict is rejected iff $V_1=$ rejected, with probability $1-c$.
+\item Both calls are biased: chosen vs.\ rejected, inconsistent.
+\end{itemize}
+Summing gives the two expressions. (1) For $c=1$ the rejected probability is $0$, and for $c=0$ the chosen probability is $0$, so the decisive agreement is $c$. The decisive mass is $(1-b)[(1-b)+b]=1-b$. (2) The ratio of the chosen to the rejected probability is $\frac{c}{1-c}\cdot\frac{(1-b)c+b}{(1-b)(1-c)+b}$. Both factors exceed $1$ iff $c>\tfrac12$, and equal $1$ at $c=\tfrac12$.
+\end{proof}
+
+\textbf{Estimand.} Over a pool in which a fraction $p$ of heuristic labels agree with the judge's deterministic preference, Theorem~\ref{thm:swap}(1) shows the decisive agreement estimates $p$ without bias from position effects.
+
+\textbf{Decision rule.} Let $k$ of $n$ decisive verdicts favour the heuristic's chosen side, and let $L(k,n)$ be the lower end of the 95\% Wilson interval. The audit returns \emph{labels\_hold} iff $n\ge30$ and $L\ge\tau=0.7$; \emph{insufficient} if $n<30$; and \emph{labels\_do\_not\_hold} otherwise.
+
+\begin{proposition}[Asymptotic false-pass rate]\label{prop:falsepass}
+If the true agreement is $p\le\tau$, then $\Pr(L\ge\tau)\le\Pr(L\ge p)\to0.025$ as $n\to\infty$.
+\end{proposition}
+\begin{proof}
+$L$ is non-decreasing in $k$, and $\{L\ge\tau\}\subseteq\{L\ge p\}$ when $p\le\tau$. The Wilson interval is the inversion of the score test, so $\{L\ge p\}$ is the event that the one-sided score test rejects $H_0\colon$ agreement $=p$ at level $0.025$. Under $H_0$ its rejection probability converges to $0.025$ by the central limit theorem~\cite{brown2001}.
+\end{proof}
+
+\section{A Collection Defect and Its Effect}\label{sec:defect}
+The collector treated a missing risk score as $+\infty$. With exactly one side missing, the score difference was infinite, cleared every threshold, and was uploaded; \texttt{json.dumps} then wrote \texttt{Infinity}, which is not JSON. The pipeline still returned the scored answer, which is reasonable. But the uploaded \emph{label} recorded only which side the scorer managed to score.
+
+\begin{proposition}[Missingness labels dilute agreement]\label{prop:missing}
+Suppose a fraction $m$ of pairs are labelled by missingness, and whether a response gets scored is independent of which response the judge prefers. The remaining pairs have agreement $p$. Then the audited agreement is $(1-m)p+m/2$.
+\end{proposition}
+\begin{proof}
+For a missingness-labelled pair, the chosen side is the scored side. It coincides with the judge-preferred side with probability $\tfrac12$ by the independence assumption. Mixing the two populations gives the result.
+\end{proof}
+The fix skips the upload whenever either score is missing, while still returning the scored answer. Records now also carry \texttt{label\_source}, so an audit can state what decided each label.
+
+\section{Closing the Loop}\label{sec:loop}
+The orchestrator accepts \texttt{objective: dpo} only with a reference to an audit whose decision is \emph{labels\_hold} and whose source bucket and prefix match the dataset. An audit of one team's pairs does not license training on another's. Training then uses only the judge-agreed pairs, with TRL's DPOTrainer and the adapter-disabled base model as reference. The prompt template is shared with the SFT path and tested, so both objectives condition on the same format.
+
+\textbf{Reliability protocol.} On held-out prompts disjoint from the training pairs (enforced), the adapter and the base model each answer. The same position-swapped judge compares them. The verdict is \emph{improved} only when the lower end of the 95\% Wilson interval on the adapter's decisive win rate exceeds $\tfrac12$. For structured steps, the fraction of answers that parse as JSON is reported alongside.
+
+\textbf{Judge choice.} Sonnet 4.6 is the strongest model the account can call. It is stronger than the Haiku 4.5 that writes the Visibility team's drafts. Pairs from steps that Sonnet 4.6 itself generates are audited with DeepSeek V3.2 instead, a different model family, so no model grades its own outputs.
+
+\section{Monte Carlo Study of the Audit}\label{sec:mc}
+We simulated pools in which the heuristic label agrees with the truly better response with probability $p$. The judge is correct on content and answers ``first'' with probability $b$ per call. Each cell of Table~\ref{tab:power} is 300 trials.
+
+\begin{table}[t]
+\centering
+\caption{Probability that the audit returns \emph{labels\_hold} ($b=0$, $\tau=0.7$).}
+\label{tab:power}
+\begin{tabular}{lrrrrrrr}
+\toprule
+$n$ & $p$=.60 & .65 & .70 & .75 & .80 & .85 & .90\\
+\midrule
+50 & 0 & 0 & 0.007 & 0.08 & 0.31 & 0.67 & 0.92\\
+100 & 0 & 0 & 0.020 & 0.25 & 0.67 & 0.94 & 1.00\\
+200 & 0 & 0 & 0.033 & 0.31 & 0.91 & 0.997 & 1.00\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Position bias ($n=200$, $p=0.85$): agreement estimate, consistency and decisive count.}
+\label{tab:bias}
+\begin{tabular}{lrrrr}
+\toprule
+$b$ & pass rate & consistency & decisive & agreement\\
+\midrule
+0.0 & 1.000 & 1.000 & 200.0 & 0.851\\
+0.2 & 0.997 & 0.801 & 160.2 & 0.847\\
+0.4 & 0.980 & 0.599 & 119.8 & 0.850\\
+0.6 & 0.857 & 0.400 & 79.9 & 0.850\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Results.} At the threshold ($p=\tau=0.7$), the false-pass rate is 0.7--3.3\%, near the 2.5\% of Proposition~\ref{prop:falsepass}; the Wilson approximation is slightly liberal at $n=200$. Below it, no trial passed. Table~\ref{tab:bias} confirms Theorem~\ref{thm:swap}. The agreement estimate stays at 0.85 at every bias level. Consistency tracks $1-b$ exactly, and the decisive count falls as $200(1-b)$. The pass rate drops only because fewer decisive verdicts widen the interval. A biased judge makes the audit more \emph{conservative}, never wrong.
+
+\section{Pending Experiments}
+\pend{(1) Real audit of TeamWeave Visibility-team pairs with Sonnet 4.6 (writer/editor steps) and DeepSeek V3.2 (planning steps): agreement, its interval, and agreement by heuristic delta. (2) If labels hold: DPO on the verified pairs (g4dn.xlarge spot), and the reliability protocol on held-out prompts. (3) If they do not: the finding that a lexical gate is not a preference signal, which is itself the result.} All code paths are implemented and tested offline. Running them requires Bedrock judge calls and a GPU.
+
+\section{Limitations}
+Theorem~\ref{thm:swap} models position bias as content-independent. A judge whose bias depends on content (e.g., favouring the longer response) is not covered. Filtering to judge-agreed pairs trains on the intersection of heuristic and judge preferences, a selection that may itself be biased toward pairs that are easy for the judge.
+
+\section{Conclusion}
+Heuristic preference labels encode the heuristic, and DPO will faithfully learn it. A position-swapped judge measures agreement without position bias, and an interval-based rule refuses labels that are not clearly better than chance at the threshold. The loop now trains only on labels that pass, and it will say whether training helped.
+
+\begin{thebibliography}{99}
+\bibitem{rafailov2023} R.~Rafailov, A.~Sharma, E.~Mitchell, S.~Ermon, C.~D. Manning, and C.~Finn, ``Direct preference optimization: Your language model is secretly a reward model,'' in \emph{Proc. NeurIPS}, 2023.
+\bibitem{bradley1952} R.~A. Bradley and M.~E. Terry, ``Rank analysis of incomplete block designs: I. The method of paired comparisons,'' \emph{Biometrika}, vol.~39, pp.~324--345, 1952.
+\bibitem{zheng2023judge} L.~Zheng \emph{et al.}, ``Judging LLM-as-a-judge with MT-Bench and Chatbot Arena,'' in \emph{Proc. NeurIPS Datasets and Benchmarks}, 2023.
+\bibitem{wang2023fair} P.~Wang \emph{et al.}, ``Large language models are not fair evaluators,'' arXiv:2305.17926, 2023.
+\bibitem{frenay2014} B.~Fr{\'e}nay and M.~Verleysen, ``Classification in the presence of label noise: A survey,'' \emph{IEEE Trans. Neural Netw. Learn. Syst.}, vol.~25, no.~5, pp.~845--869, 2014.
+\bibitem{wilson1927} E.~B. Wilson, ``Probable inference, the law of succession, and statistical inference,'' \emph{J. Amer. Statist. Assoc.}, vol.~22, pp.~209--212, 1927.
+\bibitem{brown2001} L.~D. Brown, T.~T. Cai, and A.~DasGupta, ``Interval estimation for a binomial proportion,'' \emph{Statist. Sci.}, vol.~16, no.~2, pp.~101--133, 2001.
+\end{thebibliography}
+\end{document}
