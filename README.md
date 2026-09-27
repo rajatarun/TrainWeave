@@ -93,10 +93,48 @@ prefix and writes two files to `s3://$ARTIFACTS_BUCKET/datasets/{job_id}/`:
 | File | Contents | Consumed by |
 |---|---|---|
 | `train.jsonl` | Alpaca `{instruction, input, output}` rows where `output` is the **chosen** response; `input` is the record's `context` as JSON | **`train.py` trains on this file.** It is plain SFT — the rejected response is discarded |
-| `train.dpo.jsonl` | `{prompt, chosen, rejected}` rows | **Nothing.** Written so the preference signal survives; training on it needs a `DPOTrainer`, which is a deliberate change of objective, not a config flag |
+| `train.dpo.jsonl` | `{prompt, chosen, rejected}` rows | Nothing, on the SFT path. The DPO objective (below) trains on *audited* pairs instead |
 
 Requires the `DPOTrainingBucketName` stack parameter to be set — that is what
 grants the Lambda read access to TeamWeave's bucket.
+
+### Training with the DPO objective — only on audited labels
+
+TeamWeave labels a pair by which answer has the lower `composite_risk_score`,
+a weighted mean of lexical risk indicators. That is a gate, not a judgement
+of quality, and DPO on it would teach the model whatever the heuristic
+rewards. So `"objective": "dpo"` is refused unless a label audit says the
+labels hold:
+
+```bash
+# 1. Audit: a judge compares each sampled pair in both orders (position bias
+#    shows up as "inconsistent", not as agreement). Writes audit.json and
+#    pairs.verified.jsonl under audits/{id}/ in the DPO bucket. Exit 3 = did not pass.
+python scripts/audit_dpo_labels.py --bucket teamweave-dpo-training \
+    --prefix teamweave/visibility/draft --judge-model <stronger-model-id> --sample 200
+
+# 2. Train on the verified pairs
+aws lambda invoke --function-name "$FUNCTION" --invocation-type Event --payload '{
+  "dataset_name": "visibility-draft-dpo", "objective": "dpo",
+  "dataset_source": {"type": "dpo", "bucket": "teamweave-dpo-training",
+                     "prefix": "teamweave/visibility/draft",
+                     "audit": {"key": "audits/<id>/audit.json"}}}' /dev/null
+
+# 3. Did it help? Judge adapter vs base on held-out prompts, same both-orders rule
+python scripts/eval_reliability.py generate --base <model> --adapter ./adapter \
+    --prompts heldout.jsonl --out gens.jsonl          # on a GPU box
+python scripts/eval_reliability.py score gens.jsonl --judge-model <id> --expect-json \
+    --train-pairs pairs.verified.jsonl
+```
+
+`labels_hold` means the lower bound of the 95% interval on judge agreement
+clears 0.7 over at least 30 decisive pairs; the orchestrator also checks the
+audit covers the same bucket and prefix. `eval_reliability.py` says
+`improved` only when its win-rate interval is above 0.5, and refuses a
+held-out set that overlaps the training pairs. `train.py --objective dpo`
+uses TRL's `DPOTrainer` with the adapter-disabled base as the reference
+policy; the prompt is the SFT prompt with the response removed
+(`preference_format.py`, tested).
 
 ### Registering the adapter with DeployWeave
 
@@ -124,7 +162,7 @@ still succeeds.
 | Deciding to train, and invoking this Lambda | Nothing watches the DPO prefix for a quorum of pairs. |
 | Publishing the Bedrock agent alias for the new adapter | Alias publication is a deliberate promotion, not a side effect of training. |
 | Editing `model_aliases` in TeamWeave's `team.json` | Team configs live in S3 and are edited by a human. Nothing writes them back. |
-| Training on `train.dpo.jsonl` | `train.py` is SFT-only (TRL `SFTTrainer`). |
+| Running the label audit and deciding to train with DPO | A judge costs two model calls per pair; the orchestrator enforces the result but does not run it. |
 
 ---
 

@@ -99,14 +99,9 @@ class S3CheckpointCallback(TrainerCallback):
 
 # ── Dataset helpers ────────────────────────────────────────────────────────────
 
-ALPACA_TEMPLATE = (
-    "Below is an instruction that describes a task"
-    "{input_section}. "
-    "Write a response that appropriately completes the request.\n\n"
-    "### Instruction:\n{instruction}\n\n"
-    "{input_part}"
-    "### Response:\n{output}"
-)
+# The template is shared with the DPO objective and lives in preference_format so
+# it can be tested without the training stack; see that module.
+from preference_format import ALPACA_TEMPLATE, load_preference_rows  # noqa: E402
 
 
 def _format_alpaca(example: dict) -> dict:
@@ -241,6 +236,10 @@ def train(args: argparse.Namespace) -> None:
     with open(config_path, "w") as f:
         json.dump(vars(args), f, indent=2)
 
+    if args.objective == "dpo":
+        train_dpo(args)
+        return
+
     # ── Load data ────────────────────────────────────────────────────────────
     dataset = load_jsonl_dataset(args.dataset_path)
     logger.info("Loaded %d training examples", len(dataset))
@@ -323,6 +322,62 @@ def train(args: argparse.Namespace) -> None:
     logger.info("Adapter saved.")
 
 
+def train_dpo(args: argparse.Namespace) -> None:
+    """Direct Preference Optimisation on ``{prompt, chosen, rejected}`` rows.
+
+    Only reached with ``--objective dpo``, which the orchestrator allows only
+    for a dataset whose labels passed label_audit. With a PEFT model TRL uses
+    the base weights (adapter disabled) as the reference policy, so no second
+    copy of the model is loaded.
+    """
+    from trl import DPOConfig, DPOTrainer
+
+    rows = load_preference_rows(args.dataset_path)
+    if not rows:
+        raise ValueError(f"No usable preference rows in {args.dataset_path}")
+    dataset = Dataset.from_list(rows)
+    logger.info("Loaded %d preference pairs (DPO, beta=%.3f)", len(rows), args.beta)
+
+    model, tokenizer = load_model_and_tokenizer(args.model_id)
+    tokenizer.model_max_length = args.max_seq_len
+    model = apply_lora(model, r=args.r, lora_alpha=args.lora_alpha, lora_dropout=args.lora_dropout)
+
+    steps_per_epoch = max(1, len(dataset) // (args.batch_size * args.grad_accum))
+    warmup_steps = max(1, int(0.03 * steps_per_epoch * args.epochs))
+    dpo_args = DPOConfig(
+        output_dir=args.output_dir,
+        num_train_epochs=args.epochs,
+        per_device_train_batch_size=args.batch_size,
+        gradient_accumulation_steps=args.grad_accum,
+        learning_rate=args.lr,
+        lr_scheduler_type="cosine",
+        warmup_steps=warmup_steps,
+        bf16=True,
+        optim="paged_adamw_8bit",
+        logging_steps=10,
+        save_strategy="steps",
+        save_steps=args.checkpoint_steps,
+        save_total_limit=3,
+        beta=args.beta,
+        max_length=args.max_seq_len,
+        report_to="none",
+        run_name=args.job_id,
+    )
+    trainer = DPOTrainer(
+        model=model,
+        ref_model=None,
+        args=dpo_args,
+        train_dataset=dataset,
+        processing_class=tokenizer,
+        callbacks=[S3CheckpointCallback(artifacts_bucket=args.artifacts_bucket, job_id=args.job_id,
+                                        output_dir=args.output_dir, sync_steps=args.checkpoint_steps)],
+    )
+    trainer.train()
+    trainer.model.save_pretrained(args.output_dir)
+    tokenizer.save_pretrained(args.output_dir)
+    logger.info("DPO adapter saved to %s", args.output_dir)
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 def parse_args() -> argparse.Namespace:
@@ -354,6 +409,14 @@ def parse_args() -> argparse.Namespace:
         default=100,
         help="Save checkpoint + S3 sync every N steps",
     )
+    p.add_argument(
+        "--objective",
+        choices=["sft", "dpo"],
+        default="sft",
+        help="sft trains on {instruction,input,output}; dpo on {prompt,chosen,rejected} "
+             "(only for label-audited preference data -- see label_audit.py)",
+    )
+    p.add_argument("--beta", type=float, default=0.1, help="DPO temperature (dpo objective only)")
 
     return p.parse_args()
 

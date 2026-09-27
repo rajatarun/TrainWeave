@@ -107,6 +107,8 @@ log "Dependencies installed."
 # S3 traffic stays within the VPC via the gateway endpoint — zero NAT cost.
 log "Pulling train.py from s3://${CODE_BUCKET}/training/train.py"
 aws s3 cp "s3://${CODE_BUCKET}/training/train.py" "$WORKDIR/train.py"
+# train.py imports the prompt template from here; without it the job dies at import.
+aws s3 cp "s3://${CODE_BUCKET}/training/preference_format.py" "$WORKDIR/preference_format.py"
 
 # ── 3. Pull dataset from S3 ──────────────────────────────────────────────────
 # Also free via S3 VPC gateway endpoint.
@@ -137,7 +139,8 @@ $PYTHON "$WORKDIR/train.py" \
     --dataset-path    "$DATASET_PATH" \
     --output-dir      "$OUTPUT_DIR" \
     --job-id          "${JOB_ID}" \
-    --artifacts-bucket "${ARTIFACTS_BUCKET}"
+    --artifacts-bucket "${ARTIFACTS_BUCKET}" \
+    --objective       "${TRAIN_OBJECTIVE:-sft}"
 
 log "Training complete."
 

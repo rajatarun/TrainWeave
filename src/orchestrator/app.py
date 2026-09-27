@@ -160,6 +160,60 @@ def _materialise_dpo_dataset(job_id: str, source: dict) -> tuple[str, str, dict]
     return artifacts_bucket, sft_key, provenance
 
 
+def _resolve_audited_pairs(job_id: str, source: dict) -> tuple[str, str, dict]:
+    """The preference pairs a DPO job may train on: only ones a passing label audit verified.
+
+    ``source["audit"]`` names ``{"key": ...}`` (and optionally ``"bucket"``,
+    defaulting to the DPO bucket) of an ``audit.json`` written by
+    ``scripts/audit_dpo_labels.py``. The job is refused unless the audit's
+    decision is ``labels_hold`` *and* it audited this same bucket and prefix --
+    an audit of one team's pairs does not license training on another's. The
+    verified pairs are copied into ``datasets/{job_id}/`` so the instance reads
+    them from the artifacts bucket, which is the only one its role can read.
+    """
+    audit_ref = source.get("audit") or {}
+    bucket = (source.get("bucket") or "").strip()
+    prefix = (source.get("prefix") or "").strip()
+    audit_bucket = (audit_ref.get("bucket") or bucket).strip()
+    audit_key = (audit_ref.get("key") or "").strip()
+    if not audit_key:
+        raise ValueError(
+            "objective 'dpo' requires dataset_source.audit.key: the preference labels come from a "
+            "lexical risk heuristic and must pass scripts/audit_dpo_labels.py before DPO trains on them"
+        )
+    audit = json.loads(_s3().get_object(Bucket=audit_bucket, Key=audit_key)["Body"].read())
+    if audit.get("decision") != "labels_hold":
+        raise ValueError(
+            f"label audit s3://{audit_bucket}/{audit_key} did not pass "
+            f"({audit.get('decision')}: {audit.get('reason')}); refusing to train DPO on these labels"
+        )
+    if audit.get("source_bucket") != bucket or audit.get("source_prefix") != prefix:
+        raise ValueError(
+            f"label audit covers s3://{audit.get('source_bucket')}/{audit.get('source_prefix')}, "
+            f"not s3://{bucket}/{prefix}"
+        )
+    pairs_key = audit.get("verified_pairs_key")
+    if not pairs_key:
+        raise ValueError(f"label audit s3://{audit_bucket}/{audit_key} names no verified_pairs_key")
+    body = _s3().get_object(Bucket=audit_bucket, Key=pairs_key)["Body"].read()
+    n_pairs = sum(1 for line in body.decode("utf-8").splitlines() if line.strip())
+    if n_pairs == 0:
+        raise ValueError(f"verified pairs s3://{audit_bucket}/{pairs_key} is empty")
+
+    artifacts_bucket = os.environ["ARTIFACTS_BUCKET"]
+    key = f"datasets/{job_id}/{dpo_dataset.DPO_DATASET_FILENAME}"
+    _s3().put_object(Bucket=artifacts_bucket, Key=key, Body=body, ContentType="application/x-ndjson")
+    logger.info("DPO objective: %d audited pairs (agreement %s, CI %s) -> s3://%s/%s",
+                n_pairs, audit.get("agreement"), audit.get("agreement_ci"), artifacts_bucket, key)
+    return artifacts_bucket, key, {
+        "dpo_source_bucket": bucket,
+        "dpo_source_prefix": prefix,
+        "dpo_record_count": n_pairs,
+        "label_audit_key": audit_key,
+        "label_audit_agreement": audit.get("agreement"),
+    }
+
+
 def _resolve_effective_model(local: str, global_: str) -> str:
     """Return local model if set, otherwise fall back to global model."""
     stripped = local.strip()
@@ -226,6 +280,8 @@ def handler(event: dict, context) -> dict:
             "bucket": "teamweave-dpo-training",   #   TeamWeave DPO_TRAINING_BUCKET
             "prefix": "teamweave/visibility/draft"  # {project}/{team}/{step_id}
         },
+        "objective":      "sft",                  # optional: "sft" (default) or "dpo";
+                                                  #   dpo needs dataset_source.audit (label_audit)
         "instance_type":  "g4dn.xlarge",          # optional override
         "job_id":         "my-custom-job-id"      # optional; auto-generated if absent
         "hf_token":       "hf_..."                # optional; for gated models
@@ -243,6 +299,12 @@ def handler(event: dict, context) -> dict:
         raise ValueError(
             f"Unsupported dataset_source type: {dataset_source.get('type')!r} (expected 'dpo')"
         )
+
+    objective = (event.get("objective") or "sft").strip().lower()
+    if objective not in ("sft", "dpo"):
+        raise ValueError(f"Unsupported objective {objective!r} (expected 'sft' or 'dpo')")
+    if objective == "dpo" and not dataset_source:
+        raise ValueError("objective 'dpo' requires a dpo dataset_source with a passing label audit")
 
     required = ("dataset_name",) if dataset_source else ("dataset_name", "dataset_bucket", "dataset_key")
     for field in required:
@@ -268,7 +330,9 @@ def handler(event: dict, context) -> dict:
 
     # ── Resolve dataset (explicit S3 object, or derived from DPO records) ──────
     provenance: dict = {}
-    if dataset_source:
+    if objective == "dpo":
+        dataset_bucket, dataset_key, provenance = _resolve_audited_pairs(job_id, dataset_source)
+    elif dataset_source:
         dataset_bucket, dataset_key, provenance = _materialise_dpo_dataset(job_id, dataset_source)
     else:
         dataset_bucket = event["dataset_bucket"]
@@ -288,6 +352,7 @@ def handler(event: dict, context) -> dict:
         "ARTIFACTS_BUCKET": os.environ["ARTIFACTS_BUCKET"],
         "CODE_BUCKET": os.environ["CODE_BUCKET"],
         "AWS_DEFAULT_REGION": os.environ.get("AWS_REGION", "us-east-1"),
+        "TRAIN_OBJECTIVE": objective,
     }
     # Only inject HF_TOKEN if provided — avoids empty env var breaking HF CLI
     if hf_token:
