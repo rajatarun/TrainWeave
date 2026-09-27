@@ -58,6 +58,16 @@ Reply with JSON only: {{"better": "1" | "2" | "tie", "reason": "<one sentence>"}
 
 MAX_FIELD_CHARS = 6000
 
+#: The judge used when none is named. Claude Sonnet 4.6 is the strongest model
+#: this account can call (TeamWeave's config/model_map.yaml lists Sonnet 5 and
+#: Opus 5 as unavailable). It is stronger than Haiku 4.5, which writes the
+#: Visibility team's drafts and edits. It is also the model TeamWeave's
+#: planning agents (director, strategist, daily_operator, the health and
+#: finance teams) run on -- for pairs from those steps it would be grading its
+#: own answers, so audit them with ``--judge-model deepseek.v3.2`` (a different
+#: family on Bedrock) or treat their audit as self-assessment.
+DEFAULT_JUDGE_MODEL = "us.anthropic.claude-sonnet-4-6"
+
 
 def _clip(text: Any) -> str:
     s = text if isinstance(text, str) else json.dumps(text, ensure_ascii=False, sort_keys=True, default=str)

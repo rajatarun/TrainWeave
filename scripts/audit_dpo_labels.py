@@ -16,14 +16,16 @@ whose decision is ``labels_hold`` for the same bucket and prefix, and trains on
 the verified pairs only.
 
   python scripts/audit_dpo_labels.py --bucket teamweave-dpo-training \\
-      --prefix teamweave/visibility/draft --judge-model us.anthropic.claude-sonnet-5-v1:0 \\
-      --sample 200
+      --prefix teamweave/visibility/draft --sample 200     # judge: Sonnet 4.6 by default
 
   # offline, against a local JSONL of records, no upload:
-  python scripts/audit_dpo_labels.py --file records.jsonl --judge-model ... --out audit.json
+  python scripts/audit_dpo_labels.py --file records.jsonl --out audit.json
 
 The judge should be a stronger model than the one that produced the answers,
-and not the same one: a model grading its own outputs is self-assessment.
+and not the same one: a model grading its own outputs is self-assessment. The
+default, Claude Sonnet 4.6 (label_audit.DEFAULT_JUDGE_MODEL), fits the
+Visibility team's writer and editor steps, which run on Haiku 4.5. The planning
+steps run on Sonnet 4.6 itself: judge those with --judge-model deepseek.v3.2.
 Cost is two judge calls per sampled pair.
 """
 from __future__ import annotations
@@ -46,7 +48,7 @@ def main(argv=None) -> int:
     src.add_argument("--prefix", help="S3 prefix of dpo-v1 records (with --bucket)")
     src.add_argument("--file", help="local JSONL of dpo-v1 records")
     ap.add_argument("--bucket")
-    ap.add_argument("--judge-model", required=True)
+    ap.add_argument("--judge-model", default=label_audit.DEFAULT_JUDGE_MODEL)
     ap.add_argument("--region", default="us-east-1")
     ap.add_argument("--sample", type=int, default=200)
     ap.add_argument("--seed", type=int, default=0)
