@@ -1,0 +1,15 @@
+{
+  "schema_version": "dpo-v1",
+  "timestamp": "2026-09-13T10:11:12.131415",
+  "project": "demo",
+  "team": "support",
+  "step_id": "draft",
+  "run_id": "run-local-001",
+  "prompt": "Summarize how ephemeral GPU training avoids idle compute cost.",
+  "context": {"audience": "ML platform engineers", "format": "bullet points"},
+  "chosen": "Spot instances self-terminate after training; you pay only for the run.",
+  "rejected": "Training is always expensive and unavoidable!!!",
+  "chosen_composite_score": 0.15,
+  "rejected_composite_score": 0.82,
+  "delta": 0.67
+}
