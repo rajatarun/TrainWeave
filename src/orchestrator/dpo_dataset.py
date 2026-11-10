@@ -34,6 +34,7 @@ Two files are produced from one set of records:
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, Iterable, NamedTuple
 
 # Suffixes appended to the derived-dataset prefix in the artifacts bucket.
@@ -156,5 +157,16 @@ def load_records(s3, bucket: str, keys: Iterable[str]) -> list[dict]:
         try:
             records.append(json.loads(body))
         except (ValueError, TypeError):
+            continue
+    return records
+
+
+def load_records_from_paths(paths: Iterable[Path]) -> list[dict]:
+    """Load dpo-v1 records from local JSON files; unreadable files are skipped."""
+    records: list[dict] = []
+    for path in paths:
+        try:
+            records.append(json.loads(Path(path).read_text(encoding="utf-8")))
+        except (OSError, ValueError, TypeError):
             continue
     return records
