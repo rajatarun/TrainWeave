@@ -13,19 +13,15 @@ into GitHub issues.
 
 ---
 
-### 2. Parameterise shared stack name in deploy workflow
+### 2. ~~Parameterise shared stack name in deploy workflow~~ (done)
 
-**Files:** `.github/workflows/deploy.yaml` (lines resolving `tarun-teamweave-shared`)  
-**Acceptance:** Stack name comes from `vars.SHARED_STACK_NAME` or input, defaulting to current name; README documents the variable.  
-**Why:** OSS adopters use their own networking stacks.
+Deploy workflow reads `vars.SHARED_STACK_NAME`; see `docs/DEPLOY_CONFIG.md`.
 
 ---
 
-### 3. Redact account-specific ARN from workflow example in docs only
+### 3. ~~Redact account-specific ARN from workflow~~ (done)
 
-**Files:** `README.md`, `CONTRIBUTING.md`  
-**Acceptance:** Documentation uses `arn:aws:iam::ACCOUNT_ID:role/...` placeholders; workflow file unchanged if still needed for owner's CI.  
-**Why:** Safer forks without leaking account ids in copy-paste docs.
+Deploy role ARN is `secrets.AWS_DEPLOY_ROLE_ARN`; configuration is in `docs/DEPLOY_CONFIG.md`.
 
 ---
 

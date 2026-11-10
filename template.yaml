@@ -32,18 +32,18 @@ Parameters:
     Type: String
     Default: ""
     Description: >
-      Private subnet for EC2 Spot instances. Leave empty to use LambdaSubnetAz1Id
-      from the tarun-teamweave-shared stack output (subnet-01714c0c1b4590e4e).
-      Must route outbound traffic through the existing NAT instance.
-      S3 traffic uses the VPC gateway endpoint (vpce-0c0989507284dc612) —
-      zero NAT data-transfer cost.
+      Private subnet for EC2 Spot instances. The deploy pipeline sets this from
+      the LambdaSubnetAz1Id output of your shared networking stack (see
+      vars.SHARED_STACK_NAME in docs/DEPLOY_CONFIG.md). Must reach the internet
+      for Hugging Face and AWS APIs (NAT instance or equivalent). S3 access via
+      a VPC gateway endpoint avoids NAT charges for object traffic.
 
   VpcId:
     Type: AWS::EC2::VPC::Id
     Description: >
-      VPC for the training security group. Automatically derived in the pipeline
-      from the LambdaSubnetAz1Id subnet in the tarun-teamweave-shared stack.
-      Do not set manually — the pipeline resolves this via ec2:DescribeSubnets.
+      VPC for the training security group. The deploy pipeline derives this from
+      the subnet identified by your shared stack's LambdaSubnetAz1Id output.
+      Do not set manually when using the GitHub Actions workflow.
 
   # EC2 training instance configuration
   DefaultTrainingInstanceType:

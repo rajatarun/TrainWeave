@@ -37,9 +37,9 @@ permissions:
 
 # ── Global env vars ───────────────────────────────────────────────────────────
 env:
-  AWS_REGION: us-east-1
-  SAM_STACK_NAME: trainweave
-  ASSUME_ROLE_ARN: arn:aws:iam::239571291755:role/teamweave-github-actions-sam-deployer
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  SAM_STACK_NAME: ${{ vars.SAM_STACK_NAME || 'trainweave' }}
+  SHARED_STACK_NAME: ${{ vars.SHARED_STACK_NAME }}
 
   # Model configuration — override at dispatch time or via repository variables
   GLOBAL_BASE_MODEL: ${{ inputs.global_base_model || vars.GLOBAL_BASE_MODEL || 'Qwen/Qwen2.5-0.5B-Instruct' }}
@@ -63,7 +63,7 @@ jobs:
       - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ env.ASSUME_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       # ── SAM CLI ───────────────────────────────────────────────────────────────
@@ -79,7 +79,7 @@ jobs:
         id: resolve-vpc
         run: |
           SUBNET_ID=$(aws cloudformation describe-stacks \
-            --stack-name tarun-teamweave-shared \
+            --stack-name "$SHARED_STACK_NAME" \
             --region "$AWS_REGION" \
             --query "Stacks[0].Outputs[?OutputKey=='LambdaSubnetAz1Id'].OutputValue" \
             --output text)
@@ -151,7 +151,7 @@ jobs:
       # Idempotent: re-running deploy on an unchanged stack is a no-op.
       # --no-fail-on-empty-changeset prevents failures when nothing changed.
       # S3 buckets are created by the stack with DeletionPolicy: Retain.
-      # SubnetId defaults to tarun-teamweave-shared:LambdaSubnetAz1Id if not overridden.
+      # SubnetId is read from SHARED_STACK_NAME output LambdaSubnetAz1Id.
       - name: Deploy SAM stack
         run: |
           sam deploy \
