@@ -49,8 +49,8 @@ python3 scripts/bench_dpo_conversion.py
 2. Add or update tests for Python changes.
 3. Run `pytest` locally.
 4. Update docs when behavior or parameters change.
-5. Do not commit secrets, account IDs, or personal emails in **docs** (existing
-   workflow defaults for the owner's CI may remain unchanged).
+5. Do not commit secrets, account IDs, or personal emails. Use GitHub Actions
+   secrets/variables and SAM parameters as documented in [docs/DEPLOY_CONFIG.md](docs/DEPLOY_CONFIG.md).
 
 Use the PR template checklist.
 

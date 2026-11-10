@@ -228,8 +228,8 @@ def _build_userdata(env_vars: dict[str, str]) -> str:
     """
     Build a minimal shell script that exports env vars and pulls + runs
     bootstrap.sh from S3. The instance role grants S3 access; the S3 VPC
-    gateway endpoint (already present in tarun-teamweave-shared) ensures
-    this call never transits the NAT instance.
+    gateway endpoint in your VPC ensures this call does not use a NAT gateway
+    for S3 traffic when the endpoint is configured.
 
     Returns base64-encoded string ready for EC2 RunInstances UserData field.
     """

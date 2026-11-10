@@ -135,6 +135,8 @@ aws s3 sync src/training/ s3://YOUR_CODE_BUCKET/training/
 
 GitHub Actions workflow `.github/workflows/deploy.yaml` can deploy and launch sample
 runs (training costs money — use workflow input `skip_training: true` for infra-only).
+Configure required [repository secrets and variables](docs/DEPLOY_CONFIG.md) before the
+first workflow run.
 
 | Parameter | Purpose |
 |-----------|---------|
