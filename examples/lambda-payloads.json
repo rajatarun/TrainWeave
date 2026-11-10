@@ -1,0 +1,27 @@
+{
+  "sft_from_s3": {
+    "dataset_name": "customer-support",
+    "dataset_bucket": "YOUR_CODE_OR_DATA_BUCKET",
+    "dataset_key": "datasets/customer-support/train.jsonl"
+  },
+  "sft_from_dpo_prefix": {
+    "dataset_name": "my-team-draft",
+    "dataset_source": {
+      "type": "dpo",
+      "bucket": "YOUR_DPO_BUCKET",
+      "prefix": "my-project/my-team/draft"
+    }
+  },
+  "dpo_objective_after_audit": {
+    "dataset_name": "my-team-draft-dpo",
+    "objective": "dpo",
+    "dataset_source": {
+      "type": "dpo",
+      "bucket": "YOUR_DPO_BUCKET",
+      "prefix": "my-project/my-team/draft",
+      "audit": {
+        "key": "audits/YOUR_AUDIT_ID/audit.json"
+      }
+    }
+  }
+}
