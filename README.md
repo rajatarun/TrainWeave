@@ -1,449 +1,169 @@
 # TrainWeave
 
-Ephemeral EC2 Spot LoRA fine-tuning orchestration. One Lambda, no SageMaker,
-no idle compute, no NAT Gateway.
+**Ephemeral EC2 Spot LoRA fine-tuning on AWS — one Lambda invoke, one GPU, no idle cluster.**
 
-```
-GitHub Actions
-    │
-    ├─ sam deploy ──────────────────────────────► CloudFormation stack
-    │                                              (Lambda + IAM — persists)
-    │
-    ├─ aws lambda invoke (dataset-a) ──────────► Lambda
-    ├─ aws lambda invoke (dataset-b) ──────────► Lambda   ──► EC2 Spot g4dn.xlarge
-    └─ aws lambda invoke (dataset-c) ──────────► Lambda       │
-                                                               ├─ pull bootstrap.sh (S3 VPC endpoint, free)
-                                                               ├─ pull dataset.jsonl (S3 VPC endpoint, free)
-                                                               ├─ download base model (NAT instance → HF Hub)
-                                                               ├─ run LoRA fine-tuning
-                                                               ├─ sync checkpoints → S3 (free)
-                                                               ├─ upload adapter → S3 (free)
-                                                               └─ shutdown -h now → instance terminates
-```
+TrainWeave is for **ML platform engineers and teams** who want Hugging Face–style LoRA
+jobs without standing up SageMaker or a persistent GPU fleet. It orchestrates training
+via a single Lambda that launches a self-terminating Spot instance.
 
----
+> **Cloud required for training.** Local development is offline-friendly (tests +
+> dataset conversion). GPU training always runs in **your** AWS account.
 
----
+<!-- Demo media placeholder: add a GIF or diagram here (e.g. docs/assets/trainweave-demo.gif) -->
 
-## The closed loop (TeamWeave → TrainWeave → DeployWeave)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-TrainWeave is the middle of a training flywheel that spans three repositories.
-Arrows marked **[code]** run by themselves; arrows marked **[manual]** need a
-person.
+## Features
 
-```
- TeamWeave                     TrainWeave                    DeployWeave
- ─────────                     ──────────                    ───────────
- worker_handler invokes each
- step twice, keeps the answer
- with the lower composite risk
-        │
-        │ [code] dpo_collector writes a chosen/rejected record per step
-        ▼
- s3://$DPO_TRAINING_BUCKET/{project}/{team}/{step_id}/{run_id}/dpo_*.json
-        │
-        │ [manual] someone decides there are enough pairs and invokes the
-        │          orchestrator with dataset_source={"type":"dpo",…}
-        ▼
-                   app.py::_materialise_dpo_dataset          [code]
-                     train.jsonl      SFT rows (trained on)
-                     train.dpo.jsonl  preference pairs (NOT trained on yet)
-                               │
-                               │ [code] EC2 spot → bootstrap.sh → train.py
-                               ▼
-                   s3://$ARTIFACTS_BUCKET/adapters/{job_id}/
-                               │
-                               │ [code] bootstrap.sh → register_adapter.py
-                               │        (skipped when ADAPTER_CATALOG_TABLE unset)
-                               ▼
-                                          DynamoDB deployweave-adapter-catalog
-                                                     │
-                                                     │ [code] adapter_resolver
-                                                     │        team_provisioner
-                                                     ▼
-                                          Bedrock agent with the adapter attached
-                                                     │
-        ┌────────────────────────────────────────────┘
-        │ [manual] create/publish the agent alias, then edit team.json in S3:
-        │          agents[].bedrock.model_aliases maps model_id → aliasId
-        ▼
- TeamWeave's next run uses the new model and produces new pairs
-```
+- SAM/CloudFormation stack: Lambda + IAM + S3 buckets + training security group
+- EC2 Spot with on-demand fallback; instance self-terminates after training
+- Optional **DPO bucket → Alpaca SFT** materialisation (`dataset_source.type: dpo`)
+- Optional **audited DPO** training objective (orchestrator enforces label audit)
+- Optional **adapter catalogue** registration (DynamoDB) for downstream deploy tooling
+- Sample Alpaca datasets under `data/`
 
-### Training on DPO pairs
+Deep dives: [architecture](docs/design/architecture.md),
+[optional flywheel](docs/design/flywheel.md),
+[integrations](docs/INTEGRATIONS.md),
+[extending](docs/EXTENDING.md).
+
+## 5-minute quickstart (local, no AWS)
 
 ```bash
-aws lambda invoke \
-  --function-name "$FUNCTION" \
-  --invocation-type Event \
-  --payload '{
-    "dataset_name": "visibility-draft",
-    "dataset_source": {
-      "type": "dpo",
-      "bucket": "teamweave-dpo-training",
-      "prefix": "teamweave/visibility/draft"
-    }
-  }' \
-  /dev/null
+git clone <this-repo>
+cd TrainWeave
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt pytest
+python3 -m pytest -q
 ```
 
-Before launching the instance the Lambda reads every `dpo-v1` record under the
-prefix and writes two files to `s3://$ARTIFACTS_BUCKET/datasets/{job_id}/`:
-
-| File | Contents | Consumed by |
-|---|---|---|
-| `train.jsonl` | Alpaca `{instruction, input, output}` rows where `output` is the **chosen** response; `input` is the record's `context` as JSON | **`train.py` trains on this file.** It is plain SFT — the rejected response is discarded |
-| `train.dpo.jsonl` | `{prompt, chosen, rejected}` rows | Nothing, on the SFT path. The DPO objective (below) trains on *audited* pairs instead |
-
-Requires the `DPOTrainingBucketName` stack parameter to be set — that is what
-grants the Lambda read access to TeamWeave's bucket.
-
-### Training with the DPO objective — only on audited labels
-
-TeamWeave labels a pair by which answer has the lower `composite_risk_score`,
-a weighted mean of lexical risk indicators. That is a gate, not a judgement
-of quality, and DPO on it would teach the model whatever the heuristic
-rewards. So `"objective": "dpo"` is refused unless a label audit says the
-labels hold:
+Convert sample preference records to JSONL offline:
 
 ```bash
-# 1. Audit: a judge compares each sampled pair in both orders (position bias
-#    shows up as "inconsistent", not as agreement). Writes audit.json and
-#    pairs.verified.jsonl under audits/{id}/ in the DPO bucket. Exit 3 = did not pass.
-python scripts/audit_dpo_labels.py --bucket teamweave-dpo-training \
-    --prefix teamweave/visibility/draft --sample 200
-
-# 2. Train on the verified pairs
-aws lambda invoke --function-name "$FUNCTION" --invocation-type Event --payload '{
-  "dataset_name": "visibility-draft-dpo", "objective": "dpo",
-  "dataset_source": {"type": "dpo", "bucket": "teamweave-dpo-training",
-                     "prefix": "teamweave/visibility/draft",
-                     "audit": {"key": "audits/<id>/audit.json"}}}' /dev/null
-
-# 3. Did it help? Judge adapter vs base on held-out prompts, same both-orders rule
-python scripts/eval_reliability.py generate --base <model> --adapter ./adapter \
-    --prompts heldout.jsonl --out gens.jsonl          # on a GPU box
-python scripts/eval_reliability.py score gens.jsonl --expect-json \
-    --train-pairs pairs.verified.jsonl
+python3 scripts/convert_dpo_local.py \
+  --input examples/dpo-records \
+  --output /tmp/trainweave-out
+ls /tmp/trainweave-out/
 ```
 
-**The judge is Claude Sonnet 4.6** (`us.anthropic.claude-sonnet-4-6`) unless
-`--judge-model` says otherwise: the strongest model this account can call
-(TeamWeave's model map lists Sonnet 5 and Opus 5 as unavailable), and
-stronger than the Haiku 4.5 that writes the Visibility team's drafts and
-edits. TeamWeave's planning agents run on Sonnet 4.6 too, so for pairs from
-those steps pass `--judge-model deepseek.v3.2` — a different family — rather
-than let a model grade itself.
-
-`labels_hold` means the lower bound of the 95% interval on judge agreement
-clears 0.7 over at least 30 decisive pairs; the orchestrator also checks the
-audit covers the same bucket and prefix. `eval_reliability.py` says
-`improved` only when its win-rate interval is above 0.5, and refuses a
-held-out set that overlaps the training pairs. `train.py --objective dpo`
-uses TRL's `DPOTrainer` with the adapter-disabled base as the reference
-policy; the prompt is the SFT prompt with the response removed
-(`preference_format.py`, tested).
-
-### Registering the adapter with DeployWeave
-
-When `AdapterCatalogTableName` is set, `bootstrap.sh` runs
-`register_adapter.py` immediately after the adapter upload succeeds (never
-before — the catalogue must not advertise an adapter that is not in S3). It
-upserts one item in the shape `adapter_resolver` reads: `adapter_id` (derived
-from the job id, so a re-run replaces rather than duplicates), `base_model`,
-`task_type` (the dataset name), `s3_path`, `tags`/`primary_tag`, `created_at`,
-and a `metadata` map carrying the DPO bucket, prefix and record count.
-
-With the parameter empty, registration is skipped with a log line and the job
-still succeeds.
-
-> DeployWeave's `lora_validator.py` only accepts base models prefixed
-> `amazon.titan-` or `meta.llama`. TrainWeave's default base model is a
-> HuggingFace id, so an adapter trained on it is catalogued but
-> `team_provisioner` will decline to attach it. `register_adapter.py` logs a
-> warning when it sees this.
-
-### What is still manual
-
-| Step | Why |
-|---|---|
-| Deciding to train, and invoking this Lambda | Nothing watches the DPO prefix for a quorum of pairs. |
-| Publishing the Bedrock agent alias for the new adapter | Alias publication is a deliberate promotion, not a side effect of training. |
-| Editing `model_aliases` in TeamWeave's `team.json` | Team configs live in S3 and are edited by a human. Nothing writes them back. |
-| Running the label audit and deciding to train with DPO | A judge costs two model calls per pair; the orchestrator enforces the result but does not run it. |
-
----
-
-## Why EC2 Spot over SageMaker
-
-| | EC2 Spot `g4dn.xlarge` | SageMaker `ml.g4dn.xlarge` |
-|---|---|---|
-| Compute/hr | ~$0.18 (spot) | ~$0.53 (on-demand rate baked in) |
-| Platform fee | $0 | ~20–40% overhead |
-| Idle cost | $0 — self-terminates | $0 — jobs are ephemeral |
-| NAT Gateway | $0 — reuse existing NAT instance | $0 |
-| S3 data transfer | **$0** — S3 VPC gateway endpoint | $0 |
-| NAT data transfer (pip + HF Hub) | ~$0.045/GB | ~$0.045/GB |
-| Lambda orchestration | ~$0.000002/invoke | n/a |
-| **3 runs × 2 hr** | **~$1.31** | **~$2.75+** |
-
-Savings come from two places:
-1. **No SageMaker markup** — raw spot price vs managed training job price.
-2. **S3 VPC gateway endpoint** (`vpce-0c0989507284dc612` in `tarun-teamweave-shared`) —
-   dataset downloads and adapter uploads go through the endpoint at $0, never
-   touching the NAT instance. Only pip installs and HuggingFace Hub model
-   downloads transit the NAT.
-
-### When SageMaker Managed Spot is the better choice
-
-- **Distributed training** — multi-node jobs (Horovod/NCCL) need managed networking
-  that SageMaker provides out of the box.
-- **Automatic spot interruption recovery** — SageMaker checkpointing integrates
-  directly with spot interruption and restarts from the last checkpoint. With this
-  setup you get the same result via S3 sync + manual re-run.
-- **Compliance requirements** — HIPAA/SOC2 workloads that require a fully managed ML
-  environment with SageMaker's audit trail.
-- **Experiment tracking** — if your team is already using SageMaker Experiments or
-  Model Registry, the managed job integration reduces friction.
-- **Long training on large models** — SageMaker's Pipe mode and managed data channels
-  outperform manual `aws s3 cp` for very large datasets.
-
----
-
-## Prerequisites
-
-- AWS CLI v2
-- AWS SAM CLI (`pip install aws-sam-cli`)
-- An existing VPC with a NAT instance (not NAT Gateway) and S3 VPC gateway endpoint
-- Two S3 buckets: one for training artifacts, one for training code
-- A Deep Learning AMI ID (Amazon Linux 2 + PyTorch)
-- A security group that allows outbound HTTPS (443) from training instances
-- GitHub repository with Actions enabled
-
----
-
-## First-Time Setup
-
-### 1. Create S3 buckets
+Optional synthetic benchmark (results labeled synthetic in JSON output):
 
 ```bash
-aws s3 mb s3://my-trainweave-artifacts --region us-east-1
-aws s3 mb s3://my-trainweave-code      --region us-east-1
+python3 scripts/bench_dpo_conversion.py
 ```
 
-### 2. Find the latest Deep Learning AMI
+More examples: [examples/README.md](examples/README.md).
+
+## Core workflow (three copy-paste examples)
+
+### 1. Launch SFT training from JSONL in S3
+
+After [deploy](#aws-deploy), invoke the orchestrator:
 
 ```bash
-aws ec2 describe-images \
-  --owners amazon \
-  --filters \
-    "Name=name,Values=Deep Learning AMI GPU PyTorch*Amazon Linux 2*" \
-    "Name=state,Values=available" \
-  --query "sort_by(Images, &CreationDate)[-1].[ImageId,Name]" \
-  --output text \
-  --region us-east-1
-```
-
-### 3. Create a GitHub OIDC trust policy (recommended)
-
-This lets GitHub Actions assume an IAM role without static credentials.
-
-```bash
-# Create the OIDC provider (one-time per account)
-aws iam create-open-id-connect-provider \
-  --url https://token.actions.githubusercontent.com \
-  --client-id-list sts.amazonaws.com \
-  --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1
-
-# Create a role with a trust policy that allows your repo
-# (see AWS docs: "Configuring OpenID Connect in AWS")
-```
-
-Alternatively, create `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` secrets and
-swap the OIDC step in `deploy.yaml` for the static-key block (already commented in
-the workflow file).
-
-### 4. Set GitHub Actions secrets
-
-| Secret | Value | Where to find |
-|---|---|---|
-| `AWS_ROLE_ARN` | `arn:aws:iam::ACCOUNT:role/...` | IAM console |
-| `TRAINING_ARTIFACTS_BUCKET` | your artifacts bucket name | S3 console |
-| `TRAINING_CODE_BUCKET` | your code bucket name | S3 console |
-| `VPC_ID` | `vpc-...` | VPC console |
-| `SUBNET_ID` | `subnet-01714c0c1b4590e4e` | `tarun-teamweave-shared` → LambdaSubnetAz1Id |
-| `SECURITY_GROUP_ID` | `sg-...` | EC2 → Security Groups |
-| `TRAINING_AMI_ID` | `ami-...` | Output from step 2 above |
-| `HF_TOKEN` | `hf_...` | HuggingFace → Settings → Access Tokens (only for gated models) |
-
----
-
-## Deployment
-
-### Deploy infrastructure only
-
-```bash
-# Build the SAM application
-sam build --use-container
-
-# Deploy (first run — guided prompts for parameter values)
-sam deploy --guided
-
-# Subsequent runs (non-interactive)
-sam deploy \
-  --stack-name trainweave \
-  --no-confirm-changeset \
-  --no-fail-on-empty-changeset \
-  --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
-  --parameter-overrides \
-    GlobalBaseModel="meta-llama/Llama-3.2-3B-Instruct" \
-    LocalBaseModel="" \
-    TrainingArtifactsBucket="my-trainweave-artifacts" \
-    TrainingCodeBucket="my-trainweave-code" \
-    VpcId="vpc-..." \
-    SubnetId="subnet-01714c0c1b4590e4e" \
-    SecurityGroupId="sg-..." \
-    TrainingAmiId="ami-..."
-```
-
-### Upload training code to S3
-
-Run this after any change to `bootstrap.sh` or `train.py`:
-
-```bash
-aws s3 sync src/training/ s3://my-trainweave-code/training/ --delete
-```
-
-The deploy workflow does this automatically on every run.
-
-### Trigger training via GitHub Actions
-
-1. Go to **Actions → Deploy and Train → Run workflow**
-2. Optionally override `global_base_model` for this run
-3. Click **Run workflow**
-
-Three EC2 Spot instances will launch (one per dataset), train, and self-terminate.
-
-### Trigger training manually (CLI)
-
-```bash
-# Get the function name from the stack
 FUNCTION=$(aws cloudformation describe-stacks \
   --stack-name trainweave \
   --query "Stacks[0].Outputs[?OutputKey=='OrchestratorFunctionName'].OutputValue" \
   --output text)
 
-# Launch a single training run
 aws lambda invoke \
   --function-name "$FUNCTION" \
   --invocation-type Event \
-  --payload '{"dataset_name":"dataset-a","dataset_bucket":"my-ml-datasets","dataset_key":"lora/customer-support/train.jsonl"}' \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"dataset_name":"customer-support","dataset_bucket":"YOUR_BUCKET","dataset_key":"datasets/customer-support/train.jsonl"}' \
   /dev/null
 ```
 
----
+Adapters appear under `s3://ARTIFACTS_BUCKET/adapters/{job_id}/`.
 
-## How to Add a New Dataset
-
-1. Add a new step to `.github/workflows/deploy.yaml` — copy the `Train — dataset-c`
-   block and update `dataset_name`, `dataset_bucket`, and `dataset_key`:
-
-```yaml
-- name: Train — dataset-d (my new dataset)
-  if: ${{ inputs.skip_training != 'true' }}
-  env:
-    FUNCTION_NAME: ${{ steps.stack-outputs.outputs.function_name }}
-  run: |
-    JOB_ID="trainweave-dataset-d-$(date -u +%Y%m%d-%H%M%S)"
-    PAYLOAD=$(jq -n \
-      --arg job_id "$JOB_ID" \
-      --arg dataset_name "dataset-d" \
-      --arg dataset_bucket "my-ml-datasets" \
-      --arg dataset_key "lora/my-new-task/train.jsonl" \
-      '{job_id: $job_id, dataset_name: $dataset_name, dataset_bucket: $dataset_bucket, dataset_key: $dataset_key}')
-
-    aws lambda invoke \
-      --function-name "$FUNCTION_NAME" \
-      --invocation-type Event \
-      --payload "$PAYLOAD" \
-      --region "$AWS_REGION" \
-      /dev/null
-```
-
-2. Upload your dataset to S3:
+### 2. Materialise DPO records, then train SFT on chosen responses
 
 ```bash
-aws s3 cp my-new-task.jsonl s3://my-ml-datasets/lora/my-new-task/train.jsonl
+aws lambda invoke \
+  --function-name "$FUNCTION" \
+  --invocation-type Event \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{
+    "dataset_name": "my-draft",
+    "dataset_source": {
+      "type": "dpo",
+      "bucket": "YOUR_DPO_BUCKET",
+      "prefix": "project/team/step"
+    }
+  }' \
+  /dev/null
 ```
 
-No infrastructure changes, no `sam deploy` needed.
+Requires stack parameter `DPOTrainingBucketName` and IAM read access to that bucket.
 
----
+### 3. Train DPO objective only after a passing label audit
 
-## S3 Output Structure
+```bash
+# Run offline or on a workstation with AWS + judge access:
+python scripts/audit_dpo_labels.py --bucket YOUR_DPO_BUCKET \
+  --prefix project/team/step --sample 200
+
+aws lambda invoke \
+  --function-name "$FUNCTION" \
+  --invocation-type Event \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{
+    "dataset_name": "my-draft-dpo",
+    "objective": "dpo",
+    "dataset_source": {
+      "type": "dpo",
+      "bucket": "YOUR_DPO_BUCKET",
+      "prefix": "project/team/step",
+      "audit": {"key": "audits/YOUR_AUDIT_ID/audit.json"}
+    }
+  }' \
+  /dev/null
+```
+
+See [examples/lambda-payloads.json](examples/lambda-payloads.json) for the same shapes as JSON.
+
+## AWS deploy
+
+**Prerequisites:** AWS CLI v2, SAM CLI, a VPC with outbound path (NAT instance or
+equivalent), Deep Learning GPU AMI, and permissions to deploy IAM + Lambda + EC2.
+
+```bash
+sam build
+sam deploy --guided
+aws s3 sync src/training/ s3://YOUR_CODE_BUCKET/training/
+```
+
+GitHub Actions workflow `.github/workflows/deploy.yaml` can deploy and launch sample
+runs (training costs money — use workflow input `skip_training: true` for infra-only).
+
+| Parameter | Purpose |
+|-----------|---------|
+| `GlobalBaseModel` | Default Hugging Face model id |
+| `TrainingAmiId` | GPU Deep Learning AMI |
+| `VpcId` / `SubnetId` | Where training instances run |
+| `DPOTrainingBucketName` | Enable DPO dataset source |
+| `AdapterCatalogTableName` | Enable post-train catalogue registration |
+
+Full parameter list: see `template.yaml` and the legacy detailed sections in git
+history or expand in your fork as needed.
+
+### S3 layout (outputs)
 
 ```
 s3://ARTIFACTS_BUCKET/
-├── datasets/                              ← only for dataset_source={"type":"dpo"}
-│   └── trainweave-dataset-a-20260407-120000/
-│       ├── train.jsonl                    ← SFT dataset train.py consumes
-│       └── train.dpo.jsonl                ← preference pairs; nothing trains on these yet
-├── adapters/
-│   └── trainweave-dataset-a-20260407-120000/
-│       ├── adapter_config.json
-│       ├── adapter_model.safetensors
-│       ├── tokenizer.json
-│       ├── tokenizer_config.json
-│       └── trainweave_run_config.json    ← hyperparameters used for this run
-└── checkpoints/
-    └── trainweave-dataset-a-20260407-120000/
-        ├── checkpoint-100/
-        ├── checkpoint-200/
-        └── ...
+├── adapters/{job_id}/          # LoRA weights + tokenizer
+├── checkpoints/{job_id}/       # optional checkpoints
+└── datasets/{job_id}/          # when using dataset_source dpo
 ```
 
----
+### Monitoring
 
-## Monitoring
-
-**Running instances:**
-```bash
-aws ec2 describe-instances \
-  --filters "Name=tag:trainweave:project,Values=trainweave" "Name=instance-state-name,Values=running,pending" \
-  --query "Reservations[*].Instances[*].[InstanceId,InstanceType,Tags[?Key=='Name'].Value|[0],State.Name]" \
-  --output table
-```
-
-**Lambda logs:**
 ```bash
 aws logs tail /aws/lambda/trainweave-orchestrator --follow
+aws ec2 describe-instances \
+  --filters "Name=tag:trainweave:project,Values=trainweave" \
+            "Name=instance-state-name,Values=running,pending"
 ```
-
-**Bootstrap logs (on-instance, while running):**
-- Connect via SSM Session Manager (no key pair required): `aws ssm start-session --target INSTANCE_ID`
-- `tail -f /var/log/trainweave-bootstrap.log`
-
----
-
-## Parameters Reference
-
-| Parameter | Default | Description |
-|---|---|---|
-| `GlobalBaseModel` | — | HuggingFace model ID for all runs |
-| `LocalBaseModel` | `""` | If set, overrides `GlobalBaseModel` |
-| `TrainingArtifactsBucket` | — | S3 bucket for adapter outputs |
-| `TrainingCodeBucket` | — | S3 bucket for bootstrap.sh + train.py |
-| `VpcId` | — | Existing VPC |
-| `SubnetId` | — | Private subnet (routes via NAT instance) |
-| `SecurityGroupId` | — | SG for training instances (allow egress 443) |
-| `DefaultTrainingInstanceType` | `g4dn.xlarge` | GPU instance type |
-| `SpotMaxPrice` | `""` | Spot max price; empty = AWS automatic bid |
-| `TrainingAmiId` | — | Deep Learning AMI ID (Amazon Linux 2) |
-| `KeyPairName` | `""` | SSH key pair for debug access |
-| `DPOTrainingBucketName` | `""` | TeamWeave's DPO bucket; enables `dataset_source={"type":"dpo"}` |
-| `AdapterCatalogTableName` | `""` | DeployWeave adapter catalogue; enables post-upload registration |
-
----
 
 ## Tests
 
@@ -451,31 +171,17 @@ aws logs tail /aws/lambda/trainweave-orchestrator --follow
 python3 -m pytest -q
 ```
 
-Unit tests cover the DPO→dataset conversion (`tests/test_dpo_dataset.py`) and
-the DeployWeave catalogue item builder (`tests/test_register_adapter.py`). Both
-are pure functions with no AWS calls — no credentials required. The training
-stack itself (`train.py`) is not unit tested; it needs a GPU.
+CI-friendly unit tests cover DPO conversion, orchestrator dataset materialisation,
+adapter catalogue items, and label audit parsing. `train.py` requires a GPU and is not
+run in CI.
 
----
+## Contributing / security
 
-## Architecture Notes
+- [CONTRIBUTING.md](CONTRIBUTING.md)
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+- [SECURITY.md](SECURITY.md)
+- [Good first issues (draft)](docs/GOOD_FIRST_ISSUES.md)
 
-**Lambda runs outside VPC.** It only calls EC2 and IAM APIs — no VPC config needed.
-This avoids ENI provisioning latency and simplifies the stack.
+## License
 
-**S3 VPC gateway endpoint.** The `tarun-teamweave-shared` stack already provisions
-`vpce-0c0989507284dc612`. EC2 instances in the designated private subnets automatically
-route S3 traffic through this endpoint — no code changes, zero NAT data-transfer cost
-for dataset downloads and adapter uploads.
-
-**HuggingFace model downloads** go through the NAT instance (`i-0484a84c97a514e60`).
-A 7B model is ~14GB; at $0.045/GB NAT data transfer that's ~$0.63 per run. For frequent
-re-training of the same model, pre-cache weights in S3 and modify `bootstrap.sh` to
-pull from there instead.
-
-**Self-termination** uses `shutdown -h now` + `InstanceInitiatedShutdownBehavior=terminate`
-(set by the Lambda in `RunInstances`). The OS-initiated shutdown triggers EC2 termination
-without requiring `ec2:TerminateInstances` in the IAM policy.
-
-**No static per-run CloudFormation resources.** The Lambda calls `ec2.run_instances`
-directly. Every training run is a single API call — no stack per job, no drift to clean up.
+Apache License 2.0 — see [LICENSE](LICENSE).
