@@ -155,6 +155,132 @@ def test_build_artifact_manifest_missing_file_raises(tmp_path: Path) -> None:
         )
 
 
+def test_verify_gatewayweave_passport_hmac_valid_tampered_and_wrong_key(tmp_path: Path) -> None:
+    gw_integrity = pytest.importorskip("gatewayweave.integrity")
+
+    model_version_id = "lora:hmac-test@sha256:" + "a" * 64
+    base_record = {
+        "record_version": 1,
+        "verdict": "PASS",
+        "model_version_id": model_version_id,
+        "expires_at": "2099-01-01T00:00:00Z",
+    }
+    secret = "super-secret-hmac-key-2026"
+    signed = gw_integrity.apply_integrity(base_record, secret)
+
+    valid_path = tmp_path / "hmac_valid.json"
+    valid_path.write_text(json.dumps(signed), encoding="utf-8")
+
+    ok_res = am.verify_gatewayweave_passport(
+        valid_path,
+        expected_model_version_id=model_version_id,
+        integrity_key=secret,
+    )
+    assert ok_res["gatewayweave_installed"] is True
+    assert ok_res["signature_checked"] is True
+    assert ok_res["verified"] is True
+    assert ok_res["errors"] == []
+
+    # Wrong key must fail verification
+    wrong_key_res = am.verify_gatewayweave_passport(
+        valid_path,
+        expected_model_version_id=model_version_id,
+        integrity_key="wrong-hmac-key",
+    )
+    assert wrong_key_res["signature_checked"] is True
+    assert wrong_key_res["verified"] is False
+    assert any("does not match" in err for err in wrong_key_res["errors"])
+
+    # Tampered payload must fail verification
+    tampered = dict(signed)
+    tampered["extra_tampered"] = True
+    tampered_path = tmp_path / "hmac_tampered.json"
+    tampered_path.write_text(json.dumps(tampered), encoding="utf-8")
+    tampered_res = am.verify_gatewayweave_passport(
+        tampered_path,
+        expected_model_version_id=model_version_id,
+        integrity_key=secret,
+    )
+    assert tampered_res["signature_checked"] is True
+    assert tampered_res["verified"] is False
+    assert any("does not match" in err for err in tampered_res["errors"])
+
+    # Stripped integrity block when key is provided must fail verification
+    unsigned_path = tmp_path / "hmac_unsigned.json"
+    unsigned_path.write_text(json.dumps(base_record), encoding="utf-8")
+    unsigned_res = am.verify_gatewayweave_passport(
+        unsigned_path,
+        expected_model_version_id=model_version_id,
+        integrity_key=secret,
+    )
+    assert unsigned_res["signature_checked"] is True
+    assert unsigned_res["verified"] is False
+    assert any("missing" in err for err in unsigned_res["errors"])
+
+
+def test_verify_gatewayweave_passport_ed25519_valid_tampered_and_wrong_key(
+    tmp_path: Path,
+) -> None:
+    gw_integrity = pytest.importorskip("gatewayweave.integrity")
+    pytest.importorskip("cryptography")
+
+    priv_pem, pub_pem = gw_integrity.generate_keypair()
+    _, other_pub_pem = gw_integrity.generate_keypair()
+
+    adapter_file = tmp_path / "adapter.safetensors"
+    adapter_bytes = b"ed25519-adapter-weights"
+    adapter_file.write_bytes(adapter_bytes)
+    adapter_sha = hashlib.sha256(adapter_bytes).hexdigest()
+    model_version_id = f"lora:ed25519-test@sha256:{adapter_sha}"
+
+    base_record = {
+        "record_version": 1,
+        "verdict": "PASS",
+        "model_version_id": model_version_id,
+        "expires_at": "2099-01-01T00:00:00Z",
+    }
+    signed = gw_integrity.apply_ed25519_integrity(base_record, priv_pem)
+    valid_path = tmp_path / "ed25519_valid.json"
+    valid_path.write_text(json.dumps(signed), encoding="utf-8")
+
+    # End-to-end through build_artifact_manifest
+    manifest = am.build_artifact_manifest(
+        adapter_path=adapter_file,
+        base_model="Qwen/Qwen2.5-3B-Instruct",
+        adapter_name="ed25519-test",
+        passport_path=valid_path,
+        public_key_pem=pub_pem,
+    )
+    assert manifest["passport"]["gatewayweave_installed"] is True
+    assert manifest["passport"]["signature_checked"] is True
+    assert manifest["passport"]["verified"] is True
+    assert manifest["passport"]["errors"] == []
+
+    # Wrong Ed25519 public key must fail verification
+    wrong_key_res = am.verify_gatewayweave_passport(
+        valid_path,
+        expected_model_version_id=model_version_id,
+        public_key_pem=other_pub_pem,
+    )
+    assert wrong_key_res["signature_checked"] is True
+    assert wrong_key_res["verified"] is False
+    assert any("does not match" in err for err in wrong_key_res["errors"])
+
+    # Tampered payload must fail Ed25519 verification
+    tampered = dict(signed)
+    tampered["issuer"] = "attacker"
+    tampered_path = tmp_path / "ed25519_tampered.json"
+    tampered_path.write_text(json.dumps(tampered), encoding="utf-8")
+    tampered_res = am.verify_gatewayweave_passport(
+        tampered_path,
+        expected_model_version_id=model_version_id,
+        public_key_pem=pub_pem,
+    )
+    assert tampered_res["signature_checked"] is True
+    assert tampered_res["verified"] is False
+    assert any("does not match" in err for err in tampered_res["errors"])
+
+
 # ── Night-Shift Pre-Flight Validator tests ────────────────────────────────────
 
 

@@ -76,6 +76,7 @@ def verify_gatewayweave_passport(
     *,
     expected_model_version_id: str,
     integrity_key: str | None = None,
+    public_key_pem: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Optionally verify a GatewayWeave passport JSON against this artifact.
@@ -83,7 +84,8 @@ def verify_gatewayweave_passport(
     Gracefully degrades when ``gatewayweave`` is not installed: structural
     checks (verdict, model_version_id binding, expiration) always execute,
     while cryptographic signature verification runs whenever ``gatewayweave``
-    is importable and an integrity block is present.
+    is importable and an integrity key (HMAC-SHA256) or Ed25519 public key PEM
+    is provided or configured via ``GATEWAYWEAVE_PASSPORT_KEY``.
     """
     p_path = Path(passport_path)
     if not p_path.is_file():
@@ -126,14 +128,20 @@ def verify_gatewayweave_passport(
         from gatewayweave import integrity as gw_integrity
 
         gatewayweave_installed = True
-        if "integrity" in record:
-            key = gw_integrity.resolve_key(integrity_key)
-            if key:
-                signature_checked = True
-                try:
-                    gw_integrity.verify_integrity(record, key)
-                except Exception as exc:  # noqa: BLE001
-                    errors.append(f"gatewayweave integrity check failed: {exc}")
+        key = gw_integrity.resolve_key(integrity_key)
+        pem = public_key_pem.strip() or None if public_key_pem is not None else None
+        if key or pem:
+            signature_checked = True
+            try:
+                problems, _ = gw_integrity.integrity_findings(
+                    record,
+                    key,
+                    allow_unsigned=False,
+                    public_key_pem=pem,
+                )
+                errors.extend(problems)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"gatewayweave integrity check failed: {exc}")
     except ImportError:
         gatewayweave_installed = False
 
@@ -212,6 +220,7 @@ def build_artifact_manifest(
     passport_path: str | Path | None = None,
     *,
     integrity_key: str | None = None,
+    public_key_pem: str | None = None,
     created_at: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -224,6 +233,7 @@ def build_artifact_manifest(
         gguf_path: Optional path to exported GGUF artifact for edge inference.
         passport_path: Optional path to a GatewayWeave passport JSON to verify.
         integrity_key: Optional HMAC key for GatewayWeave passport verification.
+        public_key_pem: Optional Ed25519 public key PEM for GatewayWeave passport verification.
         created_at: Optional ISO-8601 UTC timestamp override.
         metadata: Optional extra provenance metadata dictionary.
 
@@ -284,6 +294,7 @@ def build_artifact_manifest(
             passport_path,
             expected_model_version_id=model_version_id,
             integrity_key=integrity_key,
+            public_key_pem=public_key_pem,
         )
 
     validate_artifact_manifest(manifest)
