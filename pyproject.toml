@@ -26,6 +26,9 @@ dev = [
     "ruff>=0.4.0",
 ]
 
+[project.scripts]
+trainweave-flywheel = "training.flywheel_cli:main"
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 
