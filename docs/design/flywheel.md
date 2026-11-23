@@ -31,3 +31,19 @@ works standalone with JSONL in S3 and Lambda invoke.
 Heuristic labels (e.g. composite risk scores) are **not** trusted for DPO until
 a judge audit passes. The orchestrator enforces audit metadata before copying
 verified pairs for `objective: dpo`.
+
+## Edge / Raspberry Pi Flywheel (GGUF LoRA Export)
+
+When fine-tuning edge-aligned base models (`Qwen/Qwen2.5-3B-Instruct`,
+`Qwen/Qwen2.5-7B-Instruct`, or `Qwen/Qwen3-*`) for local `llama.cpp` inference
+on a Raspberry Pi 5:
+
+1. Export the trained PEFT LoRA adapter to GGUF (`convert_lora_to_gguf.py`) and
+   compute its SHA-256 digest.
+2. Pass `gguf_artifact_uri` and `gguf_sha256` to `register_adapter.build_catalog_item(...)`
+   so the catalogue records `metadata.pinned_version_id` in
+   `<job_id>.gguf@sha256:<digest>` format (compatible with GatewayWeave's
+   content-addressed alias policy).
+3. Edge runtimes pull the pinned GGUF LoRA artifact and pass `--lora <path>` to
+   `llama-server` without requiring persistent cloud GPU infrastructure.
+
