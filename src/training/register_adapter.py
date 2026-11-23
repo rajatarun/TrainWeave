@@ -49,6 +49,15 @@ logger = logging.getLogger("trainweave.register_adapter")
 # refuse to attach it (ValueError from validate_lora_compatibility).
 DEPLOYWEAVE_LORA_PREFIXES = ("amazon.titan-", "meta.llama")
 
+# Edge-friendly open-weight base-model prefixes for GGUF / llama.cpp LoRA export
+# (e.g. Raspberry Pi 5 local inference with Qwen2.5 / Qwen3).
+EDGE_GGUF_BASE_PREFIXES = ("Qwen/Qwen2.5-", "Qwen/Qwen3-", "meta-llama/Llama-3")
+
+
+def is_edge_gguf_base_model(base_model: str) -> bool:
+    """Return True if base_model targets an edge-exportable Qwen2.5/Qwen3/Llama-3 family."""
+    return base_model.startswith(EDGE_GGUF_BASE_PREFIXES)
+
 
 def adapter_id_for_job(job_id: str) -> str:
     """Derive the catalogue key from the job id (stable across re-runs)."""
@@ -66,6 +75,8 @@ def build_catalog_item(
     dpo_source_prefix: str = "",
     dpo_record_count: int = 0,
     dpo_pairs_key: str = "",
+    gguf_artifact_uri: str = "",
+    gguf_sha256: str = "",
     created_at: int | None = None,
 ) -> dict:
     """Build the DynamoDB item for one trained adapter.
@@ -107,6 +118,17 @@ def build_catalog_item(
         })
 
     tags = [task_type, "trainweave", f"source:{dataset_source_type}"]
+
+    if gguf_artifact_uri:
+        metadata["gguf_artifact_uri"] = gguf_artifact_uri
+        metadata["edge_runtime"] = "llama.cpp"
+        tags.append("format:gguf")
+        if gguf_sha256:
+            metadata["gguf_sha256"] = gguf_sha256
+            metadata["pinned_version_id"] = f"{job_id}.gguf@sha256:{gguf_sha256}"
+
+    if is_edge_gguf_base_model(base_model):
+        tags.append("target:edge-pi")
 
     return {
         "adapter_id": adapter_id_for_job(job_id),
