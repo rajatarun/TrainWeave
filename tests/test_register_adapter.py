@@ -7,7 +7,6 @@ their range key, and ``tags`` is membership-tested as a set.
 """
 
 import pytest
-
 import register_adapter
 
 

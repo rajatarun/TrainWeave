@@ -26,6 +26,7 @@ def test_convert_dpo_local_cli(tmp_path: Path):
         capture_output=True,
         text=True,
         cwd=root,
+        check=False,
     )
     assert proc.returncode == 0, proc.stderr
     sft = (out / dpo_dataset.SFT_DATASET_FILENAME).read_text(encoding="utf-8")

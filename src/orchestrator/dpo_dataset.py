@@ -34,8 +34,9 @@ Two files are produced from one set of records:
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable, NamedTuple
+from typing import Any, NamedTuple
 
 # Suffixes appended to the derived-dataset prefix in the artifacts bucket.
 SFT_DATASET_FILENAME = "train.jsonl"

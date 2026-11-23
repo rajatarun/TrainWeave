@@ -32,7 +32,7 @@ from transformers import (
     TrainerState,
     TrainingArguments,
 )
-from trl import SFTTrainer, SFTConfig
+from trl import SFTConfig, SFTTrainer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -89,6 +89,7 @@ class S3CheckpointCallback(TrainerCallback):
             ["aws", "s3", "sync", self.output_dir, self.s3_prefix, "--quiet"],
             capture_output=True,
             text=True,
+            check=False,
         )
         if result.returncode != 0:
             # Log but don't raise — a sync failure shouldn't abort training
@@ -101,7 +102,7 @@ class S3CheckpointCallback(TrainerCallback):
 
 # The template is shared with the DPO objective and lives in preference_format so
 # it can be tested without the training stack; see that module.
-from preference_format import ALPACA_TEMPLATE, load_preference_rows  # noqa: E402
+from preference_format import ALPACA_TEMPLATE, load_preference_rows
 
 
 def _format_alpaca(example: dict) -> dict:

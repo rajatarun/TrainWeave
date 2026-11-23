@@ -7,9 +7,8 @@ The sample records mirror, field for field, what TeamWeave's
 
 import json
 
-import pytest
-
 import dpo_dataset
+import pytest
 
 
 def make_record(**overrides) -> dict:
@@ -132,7 +131,7 @@ class FakeS3:
         outer = self
 
         class _Paginator:
-            def paginate(self, Bucket, Prefix):  # noqa: N803 - boto3 kwarg casing
+            def paginate(self, Bucket, Prefix):
                 keys = [k for k in outer.objects if k.startswith(Prefix)]
                 # Two pages, to exercise pagination.
                 yield {"Contents": [{"Key": k} for k in keys[:1]]}
@@ -140,7 +139,7 @@ class FakeS3:
 
         return _Paginator()
 
-    def get_object(self, Bucket, Key):  # noqa: N803 - boto3 kwarg casing
+    def get_object(self, Bucket, Key):
         class _Body:
             def __init__(self, data):
                 self._data = data

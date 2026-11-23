@@ -37,8 +37,10 @@ import json
 import math
 import random
 import re
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass, field
-from typing import Any, Callable, Iterable, Sequence
+from itertools import pairwise
+from typing import Any
 
 JUDGE_PROMPT = """You are comparing two responses to the same task. Judge which one better accomplishes the task: correct, complete, specific, and faithful to the context. Ignore length and tone unless they affect usefulness.
 
@@ -165,7 +167,7 @@ def audit(records: Sequence[dict], invoke: Callable[[str], str], *, sample: int 
 
     buckets: list[dict[str, Any]] = []
     edges = [0.0, 0.5, 0.7, 1.0, math.inf]
-    for lo, hi in zip(edges, edges[1:]):
+    for lo, hi in pairwise(edges):
         rows = [r for r in pool if lo <= float(r.get("delta") or 0.0) < hi]
         k = sum(1 for r in rows if verdicts[record_id(r)] == "chosen")
         n = sum(1 for r in rows if verdicts[record_id(r)] in ("chosen", "rejected"))

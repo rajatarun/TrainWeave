@@ -25,12 +25,11 @@ import json
 import logging
 import os
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import boto3
-from botocore.exceptions import ClientError
-
 import dpo_dataset
+from botocore.exceptions import ClientError
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -325,7 +324,7 @@ def handler(event: dict, context) -> dict:
     # Computed before the dataset is resolved: a derived DPO dataset is written
     # under datasets/{job_id}/ so each run keeps its own immutable copy.
     job_id: str = event.get("job_id") or (
-        f"trainweave-{dataset_name}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+        f"trainweave-{dataset_name}-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}"
     )
 
     # ── Resolve dataset (explicit S3 object, or derived from DPO records) ──────

@@ -11,9 +11,8 @@ import pytest
 
 os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
 
-import app  # noqa: E402  - imported after the region default is in place
-
-from test_dpo_dataset import make_record  # noqa: E402
+import app
+from test_dpo_dataset import make_record
 
 
 class RecordingS3:
@@ -27,14 +26,14 @@ class RecordingS3:
         outer = self
 
         class _Paginator:
-            def paginate(self, Bucket, Prefix):  # noqa: N803
+            def paginate(self, Bucket, Prefix):
                 yield {"Contents": [
                     {"Key": k} for k in sorted(outer.records) if k.startswith(Prefix)
                 ]}
 
         return _Paginator()
 
-    def get_object(self, Bucket, Key):  # noqa: N803
+    def get_object(self, Bucket, Key):
         payload = json.dumps(self.records[Key]).encode()
 
         class _Body:
@@ -43,7 +42,7 @@ class RecordingS3:
 
         return {"Body": _Body()}
 
-    def put_object(self, Bucket, Key, Body, **kwargs):  # noqa: N803
+    def put_object(self, Bucket, Key, Body, **kwargs):
         self.puts[Key] = Body
 
 

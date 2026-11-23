@@ -17,9 +17,9 @@ import pytest
 
 os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
 
-import label_audit as L  # noqa: E402
-from preference_format import ALPACA_TEMPLATE, alpaca_prompt, alpaca_text, dpo_example  # noqa: E402
-from test_dpo_dataset import make_record  # noqa: E402
+import label_audit as L
+from preference_format import ALPACA_TEMPLATE, alpaca_prompt, alpaca_text, dpo_example
+from test_dpo_dataset import make_record
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -107,10 +107,10 @@ class FakeS3:
         self.objects = dict(objects)
         self.puts = {}
 
-    def get_object(self, Bucket, Key):  # noqa: N803
+    def get_object(self, Bucket, Key):
         return {"Body": io.BytesIO(self.objects[(Bucket, Key)])}
 
-    def put_object(self, Bucket, Key, Body, ContentType=None):  # noqa: N803
+    def put_object(self, Bucket, Key, Body, ContentType=None):
         self.puts[(Bucket, Key)] = Body
 
 
