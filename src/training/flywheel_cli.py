@@ -24,17 +24,21 @@ try:
         sha256_file,
         write_artifact_manifest,
     )
+    from training.lineage import AdapterLineageRegistry
     from training.preflight_validator import PreflightConfig, validate_jsonl_dataset
+    from training.promotion import AdapterPromotionManager, PromotionError
 except ImportError:  # pragma: no cover - flat pythonpath fallback (pytest.ini)
     from artifact_manifest import (  # type: ignore[no-redef]
         build_artifact_manifest,
         sha256_file,
         write_artifact_manifest,
     )
+    from lineage import AdapterLineageRegistry  # type: ignore[no-redef]
     from preflight_validator import (  # type: ignore[no-redef]
         PreflightConfig,
         validate_jsonl_dataset,
     )
+    from promotion import AdapterPromotionManager, PromotionError  # type: ignore[no-redef]
 
 FLYWHEEL_BUNDLE_SCHEMA = "flywheel-bundle-v1"
 CHAOS_CERT_SCHEMA = "chaos-cert-v1"
@@ -333,6 +337,63 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="json_output",
         help="Emit machine-readable JSON output.",
     )
+
+    promote_cmd = subparsers.add_parser(
+        "promote",
+        help="Atomically promote a certified adapter in AdapterLineageRegistry.",
+    )
+    promote_cmd.add_argument(
+        "--db",
+        required=True,
+        help="Path to SQLite AdapterLineageRegistry / promotion database.",
+    )
+    promote_cmd.add_argument(
+        "--adapter-id",
+        required=True,
+        help="Registered adapter_id to promote to active.",
+    )
+    promote_cmd.add_argument(
+        "--allow-uncertified",
+        action="store_true",
+        help="Allow promoting an uncertified adapter (sets require_certified=False).",
+    )
+    promote_cmd.add_argument(
+        "--reason",
+        default="",
+        help="Optional operator reason recorded in promotion audit history.",
+    )
+    promote_cmd.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Emit machine-readable JSON output.",
+    )
+
+    rollback_cmd = subparsers.add_parser(
+        "rollback",
+        help="Atomically roll back the active adapter for a base_model to its previous adapter.",
+    )
+    rollback_cmd.add_argument(
+        "--db",
+        required=True,
+        help="Path to SQLite AdapterLineageRegistry / promotion database.",
+    )
+    rollback_cmd.add_argument(
+        "--base-model",
+        required=True,
+        help="Canonical base_model identifier to roll back.",
+    )
+    rollback_cmd.add_argument(
+        "--reason",
+        default="",
+        help="Optional operator reason recorded in rollback audit history.",
+    )
+    rollback_cmd.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Emit machine-readable JSON output.",
+    )
     return parser
 
 
@@ -392,6 +453,87 @@ def main(argv: list[str] | None = None) -> int:
                 f"(valid_rows={bundle['dataset']['valid_rows']}, "
                 f"passport={bundle['passport']['status']}, "
                 f"chaos_cert={bundle['chaos_cert']['status']}) -> {bundle['bundle_path']}"
+            )
+        return 0
+
+    if args.command == "promote":
+        try:
+            with AdapterLineageRegistry(args.db) as registry:
+                manager = AdapterPromotionManager(registry)
+                result = manager.promote(
+                    args.adapter_id,
+                    require_certified=not args.allow_uncertified,
+                    reason=args.reason,
+                )
+        except PromotionError as exc:
+            err_payload = {
+                "promoted": False,
+                "status": "rejected",
+                "error": str(exc),
+            }
+            if args.json_output:
+                print(json.dumps(err_payload, indent=2, sort_keys=True))
+            else:
+                print(f"ERROR [promote]: {exc}", file=sys.stderr)
+            return 2
+        except (FileNotFoundError, ValueError, TypeError) as exc:
+            err_payload = {
+                "promoted": False,
+                "status": "failed",
+                "error": str(exc),
+            }
+            if args.json_output:
+                print(json.dumps(err_payload, indent=2, sort_keys=True))
+            else:
+                print(f"ERROR: {exc}", file=sys.stderr)
+            return 1
+
+        if args.json_output:
+            print(json.dumps(result, indent=2, sort_keys=True))
+        else:
+            print(
+                f"Promoted {result['active_adapter_id']} for {result['base_model']} "
+                f"(previous={result['previous_adapter_id']})"
+            )
+        return 0
+
+    if args.command == "rollback":
+        try:
+            with AdapterLineageRegistry(args.db) as registry:
+                manager = AdapterPromotionManager(registry)
+                result = manager.rollback(
+                    args.base_model,
+                    reason=args.reason,
+                )
+        except PromotionError as exc:
+            err_payload = {
+                "rolled_back": False,
+                "status": "rejected",
+                "error": str(exc),
+            }
+            if args.json_output:
+                print(json.dumps(err_payload, indent=2, sort_keys=True))
+            else:
+                print(f"ERROR [rollback]: {exc}", file=sys.stderr)
+            return 2
+        except (FileNotFoundError, ValueError, TypeError) as exc:
+            err_payload = {
+                "rolled_back": False,
+                "status": "failed",
+                "error": str(exc),
+            }
+            if args.json_output:
+                print(json.dumps(err_payload, indent=2, sort_keys=True))
+            else:
+                print(f"ERROR: {exc}", file=sys.stderr)
+            return 1
+
+        if args.json_output:
+            print(json.dumps(result, indent=2, sort_keys=True))
+        else:
+            print(
+                f"Rolled back {result['base_model']} to {result['active_adapter_id']} "
+                f"(previous={result['previous_adapter_id']})"
             )
         return 0
 
