@@ -95,12 +95,22 @@ class AdapterPromotionManager:
         *,
         require_certified: bool = True,
         reason: str = "",
+        candidate_metrics: dict[str, Any] | None = None,
+        baseline_metrics: dict[str, Any] | None = None,
+        promotion_gate: Any | None = None,
+        min_score_delta: float = 0.01,
+        max_latency_regression_pct: float = 10.0,
     ) -> dict[str, Any]:
         """Atomically promote a registered adapter to active for its ``base_model``.
 
         When ``require_certified=True`` (default), the adapter must have
         ``certified is True`` and a non-empty ``chaos_cert_sha256`` digest in
         :class:`AdapterLineageRegistry`.
+
+        When ``candidate_metrics`` and ``baseline_metrics`` are both supplied,
+        evaluates ``promotion_gate`` (defaulting to
+        :func:`trainweave.adapter_bundle.evaluate_promotion_gate`) and raises
+        :class:`PromotionError` if the candidate is not approved.
         """
         if not isinstance(adapter_id, str) or not adapter_id.strip():
             raise ValueError("adapter_id must be a non-empty string")
@@ -124,6 +134,30 @@ class AdapterPromotionManager:
                 raise PromotionError(
                     f"Adapter {adapter_id!r} is missing chaos_cert_sha256; "
                     "cannot promote when require_certified=True"
+                )
+
+        gate_result: dict[str, Any] | None = None
+        if candidate_metrics is not None or baseline_metrics is not None:
+            if candidate_metrics is None or baseline_metrics is None:
+                raise PromotionError(
+                    "Both candidate_metrics and baseline_metrics must be provided "
+                    "when evaluating the promotion gate"
+                )
+            gate_fn = promotion_gate
+            if gate_fn is None:
+                from trainweave.adapter_bundle import evaluate_promotion_gate
+
+                gate_fn = evaluate_promotion_gate
+            gate_result = gate_fn(
+                candidate_metrics,
+                baseline_metrics,
+                min_score_delta=min_score_delta,
+                max_latency_regression_pct=max_latency_regression_pct,
+            )
+            if not gate_result.get("approved"):
+                reasons_str = "; ".join(gate_result.get("reasons", [])) or "gate rejected"
+                raise PromotionError(
+                    f"Adapter {adapter_id!r} failed quantitative promotion gate: {reasons_str}"
                 )
 
         base_model = str(adapter["base_model"])
