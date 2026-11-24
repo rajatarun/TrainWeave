@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 
 import pytest
-from jsonschema import Draft202012Validator
 
 from training.lineage import AdapterLineageRegistry
 from training.promotion import AdapterPromotionManager, PromotionError
@@ -63,6 +62,8 @@ def test_export_and_verify_adapter_bundle_conforms_to_schema(tmp_path: Path) -> 
     assert snapshot["checksum_sha256"] == compute_components_checksum(snapshot["components"])
 
     if NODE_SNAPSHOT_SCHEMA_PATH.is_file():
+        from jsonschema import Draft202012Validator
+
         schema = json.loads(NODE_SNAPSHOT_SCHEMA_PATH.read_text(encoding="utf-8"))
         Draft202012Validator(schema).validate(snapshot)
 

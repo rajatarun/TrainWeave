@@ -6,3 +6,4 @@
 # by src/training/bootstrap.sh.
 
 boto3>=1.34.0
+jsonschema>=4.23.0
